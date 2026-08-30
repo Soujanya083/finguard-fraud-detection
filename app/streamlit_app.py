@@ -4,6 +4,11 @@ import numpy as np
 import joblib
 import shap
 import matplotlib.pyplot as plt
+import sys
+import os
+
+sys.path.append(os.path.join(os.path.dirname(__file__), "..", "src"))
+from llm_narrative import generate_fraud_narrative
 
 st.set_page_config(page_title="FinGuard - Fraud Detection", layout="wide")
 
@@ -14,7 +19,7 @@ def load_model():
         model = joblib.load("models/final_rf_model.pkl")
         scaler = joblib.load("models/scaler.pkl")
         return model, scaler
-    except FileNotFoundError as e:
+    except FileNotFoundError:
         st.error(
             "⚠️ Model files not found. Make sure `models/final_rf_model.pkl` and "
             "`models/scaler.pkl` exist — run `03_modeling.ipynb` first to train and save them."
@@ -76,7 +81,6 @@ with col1:
 
 with col2:
     if predict_btn:
-        # Validate the selected row has all required features before predicting
         missing_cols = [c for c in feature_cols if c not in selected_row.index]
         if missing_cols:
             st.error(
@@ -95,7 +99,6 @@ with col2:
             st.info("This usually means the sample data's columns don't match what the model expects.")
             st.stop()
 
-        # --- Recommended action based on risk tier (simple, explainable thresholds) ---
         if proba >= 0.80:
             action = "🚫 Auto-block & escalate to fraud team"
             action_color = "error"
@@ -120,10 +123,15 @@ with col2:
 
         # SHAP explanation for this single prediction (non-fatal if it fails)
         st.subheader("Why this prediction? (SHAP Explanation)")
+        top_features = []
         try:
             explainer = shap.TreeExplainer(model)
             shap_vals = explainer.shap_values(X_input_scaled)
             shap_vals_fraud = shap_vals[:, :, 1] if np.array(shap_vals).ndim == 3 else shap_vals[1]
+
+            # Get top 4 features by absolute SHAP impact for THIS prediction
+            impacts = list(zip(feature_cols, shap_vals_fraud[0]))
+            top_features = sorted(impacts, key=lambda x: abs(x[1]), reverse=True)[:4]
 
             fig, ax = plt.subplots(figsize=(10, 6))
             shap.summary_plot(shap_vals_fraud, X_input, feature_names=feature_cols, plot_type="bar", show=False)
@@ -133,8 +141,22 @@ with col2:
                 f"⚠️ Could not generate SHAP explanation ({e}). "
                 "The risk score and recommendation above are still valid."
             )
+
+        # --- LLM Narrative Layer (real Gemini API call) ---
+        st.subheader("🤖 AI-Generated Risk Summary")
+        if top_features:
+            with st.spinner("Generating natural-language explanation..."):
+                narrative = generate_fraud_narrative(
+                    risk_probability=proba,
+                    top_features=top_features,
+                    amount=selected_row["Amount"],
+                    recommended_action=action,
+                )
+            st.info(narrative)
+        else:
+            st.caption("AI narrative unavailable — SHAP feature data wasn't generated above.")
     else:
         st.info("👈 Select a transaction and click Assess to see results.")
 
 st.markdown("---")
-st.caption("FinGuard | Track 2: AI Risk Manager | Model: Tuned Random Forest (Precision 0.71, Recall 0.79, PR-AUC 0.80)")
+st.caption("FinGuard | Track 2: AI Risk Manager | Model: Tuned Random Forest (Precision 0.71, Recall 0.79, PR-AUC 0.80) | AI narrative: Google Gemini")
