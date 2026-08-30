@@ -1,0 +1,14 @@
+pandas
+numpy
+matplotlib
+seaborn
+sqlalchemy
+psycopg2-binary
+python-dotenv
+scikit-learn
+xgboost
+lightgbm
+imbalanced-learn
+shap
+joblib
+streamlit
