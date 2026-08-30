@@ -48,6 +48,14 @@ Transaction → Feature Engineering → ML Risk Model → Risk Score
 | False Positives | 22 |
 | False Negatives | 16 |
 
+## Testing & Evaluation Methodology
+
+- **Train/test split**: Chronological, not random — data was sorted by transaction `Time`, with the first 80% used for training and the final 20% held out for testing. A random split would let the model implicitly learn from transactions that happen *after* the ones it's being tested on, which doesn't reflect how a fraud system actually operates in production (it only ever sees the past). This is a deliberate choice, not an oversight.
+- **Why PR-AUC over accuracy**: With fraud at ~0.17% of transactions, a model predicting "not fraud" for everything would still be 99.8% accurate — and useless. Precision-Recall AUC was used as the primary model-selection metric during hyperparameter search instead, since it reflects performance specifically on the minority (fraud) class.
+- **Why Random Forest over the alternatives tested**: Six models were compared (Logistic Regression, Decision Tree, Random Forest, two XGBoost configurations, LightGBM) on identical train/test splits. The tuned Random Forest achieved the best PR-AUC (0.802) while remaining fast enough for real-time single-transaction scoring in the dashboard — a relevant practical constraint, not just a leaderboard number.
+- **Class imbalance handling**: SMOTE (Synthetic Minority Oversampling) was applied to the training set only — never to the test set, to avoid leaking synthetic patterns into evaluation. `scale_pos_weight`-based class weighting was also tested as an alternative approach on some models (XGBoost) for comparison.
+- **Hyperparameter tuning**: `RandomizedSearchCV` with PR-AUC as the scoring metric, cross-validated on the training set only, to avoid tuning against the same data used for final evaluation.
+
 ## Business Impact (held-out test set, illustrative)
 
 Using the confusion matrix above and an assumed ₹150 cost per false-positive review:
