@@ -7,16 +7,36 @@ import matplotlib.pyplot as plt
 
 st.set_page_config(page_title="FinGuard - Fraud Detection", layout="wide")
 
-# --- Load model, scaler, and real sample transactions ---
+# --- Load model, scaler, and real sample transactions (with error handling) ---
 @st.cache_resource
 def load_model():
-    model = joblib.load("models/final_rf_model.pkl")
-    scaler = joblib.load("models/scaler.pkl")
-    return model, scaler
+    try:
+        model = joblib.load("models/final_rf_model.pkl")
+        scaler = joblib.load("models/scaler.pkl")
+        return model, scaler
+    except FileNotFoundError as e:
+        st.error(
+            "⚠️ Model files not found. Make sure `models/final_rf_model.pkl` and "
+            "`models/scaler.pkl` exist — run `03_modeling.ipynb` first to train and save them."
+        )
+        st.stop()
+    except Exception as e:
+        st.error(f"⚠️ Unexpected error loading model: {e}")
+        st.stop()
 
 @st.cache_data
 def load_samples():
-    return pd.read_csv("data/sample_transactions.csv")
+    try:
+        return pd.read_csv("data/sample_transactions.csv")
+    except FileNotFoundError:
+        st.error(
+            "⚠️ Sample transactions file not found. Run `python src/extract_samples.py` "
+            "first to generate `data/sample_transactions.csv`."
+        )
+        st.stop()
+    except Exception as e:
+        st.error(f"⚠️ Unexpected error loading sample transactions: {e}")
+        st.stop()
 
 model, scaler = load_model()
 samples_df = load_samples()
@@ -42,6 +62,10 @@ with col1:
         "SHAP below explains their *relative* contribution to this specific prediction."
     )
 
+    if samples_df.empty:
+        st.warning("No sample transactions available.")
+        st.stop()
+
     scenario_label = st.selectbox("Transaction scenario", samples_df["label"].tolist())
     selected_row = samples_df[samples_df["label"] == scenario_label].iloc[0]
 
@@ -52,10 +76,24 @@ with col1:
 
 with col2:
     if predict_btn:
-        X_input = pd.DataFrame([selected_row])[feature_cols]
-        X_input_scaled = scaler.transform(X_input)
+        # Validate the selected row has all required features before predicting
+        missing_cols = [c for c in feature_cols if c not in selected_row.index]
+        if missing_cols:
+            st.error(
+                f"⚠️ This transaction is missing required features: {', '.join(missing_cols)}. "
+                "The sample data may be out of sync with the model — try regenerating it with "
+                "`python src/extract_samples.py`."
+            )
+            st.stop()
 
-        proba = model.predict_proba(X_input_scaled)[0][1]
+        try:
+            X_input = pd.DataFrame([selected_row])[feature_cols]
+            X_input_scaled = scaler.transform(X_input)
+            proba = model.predict_proba(X_input_scaled)[0][1]
+        except Exception as e:
+            st.error(f"⚠️ Prediction failed: {e}")
+            st.info("This usually means the sample data's columns don't match what the model expects.")
+            st.stop()
 
         # --- Recommended action based on risk tier (simple, explainable thresholds) ---
         if proba >= 0.80:
@@ -80,15 +118,21 @@ with col2:
             "These are illustrative starting points, not tuned against real cost data."
         )
 
-        # SHAP explanation for this single prediction
+        # SHAP explanation for this single prediction (non-fatal if it fails)
         st.subheader("Why this prediction? (SHAP Explanation)")
-        explainer = shap.TreeExplainer(model)
-        shap_vals = explainer.shap_values(X_input_scaled)
-        shap_vals_fraud = shap_vals[:, :, 1] if np.array(shap_vals).ndim == 3 else shap_vals[1]
+        try:
+            explainer = shap.TreeExplainer(model)
+            shap_vals = explainer.shap_values(X_input_scaled)
+            shap_vals_fraud = shap_vals[:, :, 1] if np.array(shap_vals).ndim == 3 else shap_vals[1]
 
-        fig, ax = plt.subplots(figsize=(10, 6))
-        shap.summary_plot(shap_vals_fraud, X_input, feature_names=feature_cols, plot_type="bar", show=False)
-        st.pyplot(fig)
+            fig, ax = plt.subplots(figsize=(10, 6))
+            shap.summary_plot(shap_vals_fraud, X_input, feature_names=feature_cols, plot_type="bar", show=False)
+            st.pyplot(fig)
+        except Exception as e:
+            st.warning(
+                f"⚠️ Could not generate SHAP explanation ({e}). "
+                "The risk score and recommendation above are still valid."
+            )
     else:
         st.info("👈 Select a transaction and click Assess to see results.")
 
