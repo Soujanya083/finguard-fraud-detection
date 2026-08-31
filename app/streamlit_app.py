@@ -12,17 +12,23 @@ from llm_narrative import generate_fraud_narrative
 
 st.set_page_config(page_title="FinGuard - Fraud Detection", layout="wide")
 
-# --- Load model, scaler, samples, and full test predictions (with error handling) ---
+RF_WEIGHT = 0.7
+ISO_WEIGHT = 0.3
+
+# --- Load model, scaler, isolation forest, and real sample transactions ---
 @st.cache_resource
 def load_model():
     try:
         model = joblib.load("models/final_rf_model.pkl")
         scaler = joblib.load("models/scaler.pkl")
-        return model, scaler
-    except FileNotFoundError:
+        iso_forest = joblib.load("models/isolation_forest.pkl")
+        iso_score_scaler = joblib.load("models/iso_score_scaler.pkl")
+        pca_col_idx = joblib.load("models/pca_col_idx.pkl")
+        return model, scaler, iso_forest, iso_score_scaler, pca_col_idx
+    except FileNotFoundError as e:
         st.error(
-            "⚠️ Model files not found. Make sure `models/final_rf_model.pkl` and "
-            "`models/scaler.pkl` exist — run `03_modeling.ipynb` first to train and save them."
+            f"⚠️ Model files not found ({e}). Run `03_modeling.ipynb` fully "
+            "(including the Isolation Forest cells) to generate all required model files."
         )
         st.stop()
     except Exception as e:
@@ -47,12 +53,10 @@ def load_samples():
 def load_test_predictions():
     try:
         return pd.read_csv("data/test_predictions.csv")
-    except FileNotFoundError:
-        return None
     except Exception:
         return None
 
-model, scaler = load_model()
+model, scaler, iso_forest, iso_score_scaler, pca_col_idx = load_model()
 samples_df = load_samples()
 test_preds_df = load_test_predictions()
 
@@ -60,17 +64,38 @@ feature_cols = ['V1','V2','V3','V4','V5','V6','V7','V8','V9','V10','V11','V12','
                  'V15','V16','V17','V18','V19','V20','V21','V22','V23','V24','V25','V26','V27','V28',
                  'Hour','Is_High_Risk_Hour','Amount_Log','Amount_Zscore','Is_Round_Amount','Txn_Count_Last_Hour']
 
+
+def get_combined_risk_score(X_input_scaled):
+    """Blend the supervised Random Forest score with the Isolation Forest
+    anomaly score (fit on PCA features only). Weights (0.7 RF / 0.3 ISO)
+    were chosen based on measured precision/recall trade-offs on the held-out
+    test set -- see README for the full comparison table."""
+    rf_proba = model.predict_proba(X_input_scaled)[0][1]
+
+    X_pca_only = X_input_scaled[:, pca_col_idx]
+    iso_raw_score = -iso_forest.decision_function(X_pca_only)
+    iso_score_norm = iso_score_scaler.transform(iso_raw_score.reshape(-1, 1)).flatten()[0]
+    iso_score_norm = np.clip(iso_score_norm, 0, 1)  # guard against out-of-range values on new data
+
+    combined = (RF_WEIGHT * rf_proba) + (ISO_WEIGHT * iso_score_norm)
+    return combined, rf_proba, iso_score_norm
+
+
 st.title("🛡️ FinGuard — Fraud Detection System")
 
 tab1, tab2 = st.tabs(["🔍 Transaction Assessment", "🎚️ Risk Threshold Simulator"])
 
 # ============================================================
-# TAB 1: Existing single-transaction assessment (unchanged)
+# TAB 1: Transaction assessment (now using combined RF + Isolation Forest score)
 # ============================================================
 with tab1:
     st.markdown(
         "Select a real transaction from the held-out test set to see its fraud risk score, "
         "the model's reasoning, and a recommended action."
+    )
+    st.caption(
+        f"Risk score = {RF_WEIGHT} × Random Forest probability + {ISO_WEIGHT} × Isolation Forest "
+        "anomaly score (weights chosen from measured precision/recall trade-offs — see README)."
     )
 
     col1, col2 = st.columns([1, 2])
@@ -102,24 +127,22 @@ with tab1:
             if missing_cols:
                 st.error(
                     f"⚠️ This transaction is missing required features: {', '.join(missing_cols)}. "
-                    "The sample data may be out of sync with the model — try regenerating it with "
-                    "`python src/extract_samples.py`."
+                    "Try regenerating sample data with `python src/extract_samples.py`."
                 )
                 st.stop()
 
             try:
                 X_input = pd.DataFrame([selected_row])[feature_cols]
                 X_input_scaled = scaler.transform(X_input)
-                proba = model.predict_proba(X_input_scaled)[0][1]
+                combined_proba, rf_proba, iso_score = get_combined_risk_score(X_input_scaled)
             except Exception as e:
                 st.error(f"⚠️ Prediction failed: {e}")
-                st.info("This usually means the sample data's columns don't match what the model expects.")
                 st.stop()
 
-            if proba >= 0.80:
+            if combined_proba >= 0.80:
                 action = "🚫 Auto-block & escalate to fraud team"
                 action_color = "error"
-            elif proba >= 0.40:
+            elif combined_proba >= 0.40:
                 action = "🔎 Flag for manual review"
                 action_color = "warning"
             else:
@@ -127,9 +150,11 @@ with tab1:
                 action_color = "success"
 
             st.subheader("Risk Assessment")
-            c1, c2 = st.columns(2)
-            c1.metric("Fraud Probability", f"{proba*100:.2f}%")
-            c2.metric("Actual Label (ground truth)", "FRAUD" if selected_row["Class"] == 1 else "LEGIT")
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Combined Risk Score", f"{combined_proba*100:.2f}%")
+            c2.metric("— RF component", f"{rf_proba*100:.1f}%")
+            c3.metric("— Anomaly component", f"{iso_score*100:.1f}%")
+            st.metric("Actual Label (ground truth)", "FRAUD" if selected_row["Class"] == 1 else "LEGIT")
 
             st.subheader("Recommended Action")
             getattr(st, action_color)(f"**{action}**")
@@ -151,17 +176,15 @@ with tab1:
                 fig, ax = plt.subplots(figsize=(10, 6))
                 shap.summary_plot(shap_vals_fraud, X_input, feature_names=feature_cols, plot_type="bar", show=False)
                 st.pyplot(fig)
+                st.caption("Note: SHAP explains the Random Forest component. The anomaly component is a separate, unsupervised signal blended in above.")
             except Exception as e:
-                st.warning(
-                    f"⚠️ Could not generate SHAP explanation ({e}). "
-                    "The risk score and recommendation above are still valid."
-                )
+                st.warning(f"⚠️ Could not generate SHAP explanation ({e}). Risk score above is still valid.")
 
             st.subheader("🤖 AI-Generated Risk Summary")
             if top_features:
                 with st.spinner("Generating natural-language explanation..."):
                     narrative = generate_fraud_narrative(
-                        risk_probability=proba,
+                        risk_probability=combined_proba,
                         top_features=top_features,
                         amount=selected_row["Amount"],
                         recommended_action=action,
@@ -173,7 +196,7 @@ with tab1:
             st.info("👈 Select a transaction and click Assess to see results.")
 
 # ============================================================
-# TAB 2: Risk Threshold Simulator (new)
+# TAB 2: Risk Threshold Simulator (unchanged — still uses RF-only test predictions)
 # ============================================================
 with tab2:
     st.markdown(
@@ -181,11 +204,15 @@ with tab2:
         "Move the slider to see how that single choice trades off fraud caught, false alarms, and "
         "manual review workload — computed live on the **actual held-out test set** (56,962 real transactions)."
     )
+    st.caption(
+        "Note: this simulator currently uses the Random Forest score only (not the combined RF+Isolation "
+        "Forest score used in the Transaction Assessment tab)."
+    )
 
     if test_preds_df is None:
         st.warning(
             "⚠️ Test predictions file not found. Run the export cell in `03_modeling.ipynb` "
-            "(saves `data/test_predictions.csv`) to enable this simulator."
+            "to enable this simulator."
         )
     else:
         threshold = st.slider(
@@ -201,13 +228,11 @@ with tab2:
         tp = ((y_true == 1) & (y_flagged == 1)).sum()
         fp = ((y_true == 0) & (y_flagged == 1)).sum()
         fn = ((y_true == 1) & (y_flagged == 0)).sum()
-        tn = ((y_true == 0) & (y_flagged == 0)).sum()
 
         precision = tp / (tp + fp) if (tp + fp) > 0 else 0
         recall = tp / (tp + fn) if (tp + fn) > 0 else 0
 
         fraud_caught_amt = amounts[(y_true == 1) & (y_flagged == 1)].sum()
-        fraud_missed_amt = amounts[(y_true == 1) & (y_flagged == 0)].sum()
 
         COST_PER_REVIEW = 150
         review_cost = fp * COST_PER_REVIEW
@@ -226,11 +251,9 @@ with tab2:
         m7.metric("Net Benefit", f"₹{net_benefit:,.0f}")
 
         st.caption(
-            "Lower the threshold → catch more fraud, but more false alarms (more manual review workload). "
-            "Raise it → fewer false alarms, but more fraud slips through. "
             "₹150/review is a stated assumption, not derived from real cost data. "
             "Currency shown as ₹ for illustration; the source dataset does not specify a currency."
         )
 
 st.markdown("---")
-st.caption("FinGuard | Track 2: AI Risk Manager | Model: Tuned Random Forest (Precision 0.71, Recall 0.79, PR-AUC 0.80) | AI narrative: Google Gemini")
+st.caption("FinGuard | Track 2: AI Risk Manager | Risk Score: 0.7×Random Forest + 0.3×Isolation Forest | AI narrative: Google Gemini")
