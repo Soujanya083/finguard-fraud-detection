@@ -105,3 +105,13 @@ Using the confusion matrix above and an assumed ₹150 cost per false-positive r
 ## Author
 
 Built by Soujanya U as a submission for Razorpay AI Buildathon 2026, Track 2 (AI Risk Manager).
+
+## Exploratory Work: Unsupervised Anomaly Detection
+
+As an extension beyond the core supervised model, an Isolation Forest (unsupervised anomaly detection) was trained and evaluated as a potential complementary signal — the idea being that a supervised model can only catch fraud patterns similar to what it was trained on, while anomaly detection might catch genuinely novel patterns by flagging statistical outliers instead.
+
+**Result:** Isolation Forest significantly underperformed the supervised Random Forest on this dataset — catching only 1 of 75 fraud cases in the held-out test set (recall ≈ 1%), even when restricted to just the PCA features (V1–V28) most associated with fraud per the SHAP analysis. This was tested, not assumed.
+
+**Interpretation:** this suggests the fraud patterns in this dataset are consistent and learnable from labeled examples, rather than being genuine statistical outliers in the raw feature space — which is what unsupervised anomaly detection is designed to catch. In other words, this fraud "looks like" fraud the model has seen before, not like generically unusual behavior.
+
+**Decision:** based on this finding, Isolation Forest was **not** wired into the live dashboard or used in the final risk score — including a component that adds noise rather than signal would make the system less reliable, not more. This is documented here as a deliberate, evidence-based modeling decision rather than an unexplored gap. In a real deployment with different/richer features (e.g. device fingerprint, IP geolocation, merchant behavior), anomaly detection may perform differently and would be worth revisiting.
