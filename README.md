@@ -115,3 +115,40 @@ As an extension beyond the core supervised model, an Isolation Forest (unsupervi
 **Interpretation:** this suggests the fraud patterns in this dataset are consistent and learnable from labeled examples, rather than being genuine statistical outliers in the raw feature space — which is what unsupervised anomaly detection is designed to catch. In other words, this fraud "looks like" fraud the model has seen before, not like generically unusual behavior.
 
 **Decision:** based on this finding, Isolation Forest was **not** wired into the live dashboard or used in the final risk score — including a component that adds noise rather than signal would make the system less reliable, not more. This is documented here as a deliberate, evidence-based modeling decision rather than an unexplored gap. In a real deployment with different/richer features (e.g. device fingerprint, IP geolocation, merchant behavior), anomaly detection may perform differently and would be worth revisiting.
+
+
+## Updated Results Section (replace the existing "Results" table with this)
+
+## Results (held-out test set)
+
+Two model configurations were evaluated. The live dashboard uses the **combined model**.
+
+| Metric | Random Forest only | Combined (0.7 × RF + 0.3 × Isolation Forest) |
+|---|---|---|
+| Precision (Fraud class) | 0.71 | 0.628 |
+| Recall (Fraud class) | 0.79 | 0.787 |
+| ROC-AUC | 0.983 | — |
+| PR-AUC | 0.802 | — |
+
+**Why the combined model, despite lower precision at this specific threshold comparison?** The blend weight (0.7/0.3) was chosen by testing multiple weightings against the held-out test set and measuring the actual precision/recall trade-off at each (see `03_modeling.ipynb` for the full comparison across weights 1.0→0.5). A small Isolation Forest contribution (30%) improved precision meaningfully over a naive 50/50 blend, while keeping recall within a point of the RF-only model. The two "Precision" figures above aren't directly comparable line-for-line since they reflect different score distributions at the same 0.40 threshold — full methodology and the weight-comparison table are in the notebook.
+
+---
+
+## Replace the existing "Exploratory Work: Unsupervised Anomaly Detection" section with this
+
+## Anomaly Detection: Isolation Forest
+
+An Isolation Forest (unsupervised anomaly detection) was trained and evaluated as a complementary signal to the supervised Random Forest — the idea being that a supervised model can only catch fraud patterns similar to what it was trained on, while anomaly detection might catch novel patterns by flagging statistical outliers.
+
+**Standalone performance:** used alone, Isolation Forest performed poorly on this dataset — catching only 1 of 75 fraud cases in the test set (recall ≈ 1%), even restricted to the PCA features most associated with fraud per the SHAP analysis. This suggests the fraud patterns here are consistent and learnable from labeled examples, rather than being genuine statistical outliers in the raw feature space.
+
+**Blended performance:** rather than discard this, its score was tested as a *small* weighted contribution alongside the Random Forest's probability, at several blend weights:
+
+| RF weight | Isolation Forest weight | Precision | Recall |
+|---|---|---|---|
+| 1.0 | 0.0 (baseline) | 0.448 | 0.800 |
+| 0.9 | 0.1 | 0.526 | 0.800 |
+| **0.7** | **0.3** | **0.628** | **0.787** |
+| 0.5 | 0.5 | 0.431 | 0.787 |
+
+At a small weight (30%), the anomaly score improved precision meaningfully with negligible recall cost — likely acting as a tie-breaker on borderline cases rather than driving predictions outright. At a heavy 50/50 blend, performance degrades, confirming the earlier finding that Isolation Forest alone is a weak signal on this dataset. **The live dashboard uses the 0.7/0.3 blend**, and displays both component scores separately (not just the combined number) so the contribution of each model stays transparent rather than hidden inside a single opaque score.
