@@ -6,14 +6,64 @@ import shap
 import matplotlib.pyplot as plt
 import sys
 import os
+from datetime import datetime
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import URL
+from dotenv import load_dotenv
 
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", "src"))
 from llm_narrative import generate_fraud_narrative
+
+load_dotenv(override=True)
 
 st.set_page_config(page_title="FinGuard - Fraud Detection", layout="wide")
 
 RF_WEIGHT = 0.7
 ISO_WEIGHT = 0.3
+
+# --- DB connection for audit logging (separate, lightweight, non-fatal if it fails) ---
+@st.cache_resource
+def get_db_engine():
+    try:
+        url = URL.create(
+            "postgresql+psycopg2",
+            username=os.environ.get("DB_USER", "postgres"),
+            password=os.environ["DB_PASSWORD"],
+            host=os.environ.get("DB_HOST", "localhost"),
+            port=os.environ.get("DB_PORT", "5432"),
+            database=os.environ.get("DB_NAME", "finguard_db"),
+        )
+        return create_engine(url)
+    except Exception:
+        return None
+
+db_engine = get_db_engine()
+
+
+def log_to_audit_trail(label, amount, rf_score, anomaly_score, combined_score, action, actual_label):
+    """Write one row to the audit_log table. Never raises -- a logging
+    failure should never break the actual risk assessment the user is
+    trying to see."""
+    if db_engine is None:
+        return False
+    try:
+        with db_engine.connect() as conn:
+            conn.execute(
+                text("""
+                    INSERT INTO audit_log
+                    (transaction_label, amount, rf_score, anomaly_score, combined_score, recommended_action, actual_label)
+                    VALUES (:label, :amount, :rf_score, :anomaly_score, :combined_score, :action, :actual_label)
+                """),
+                {
+                    "label": label, "amount": float(amount), "rf_score": float(rf_score),
+                    "anomaly_score": float(anomaly_score), "combined_score": float(combined_score),
+                    "action": action, "actual_label": actual_label,
+                },
+            )
+            conn.commit()
+        return True
+    except Exception:
+        return False
 
 # --- Load model, scaler, isolation forest, and real sample transactions ---
 @st.cache_resource
@@ -155,6 +205,16 @@ with tab1:
             c2.metric("— RF component", f"{rf_proba*100:.1f}%")
             c3.metric("— Anomaly component", f"{iso_score*100:.1f}%")
             st.metric("Actual Label (ground truth)", "FRAUD" if selected_row["Class"] == 1 else "LEGIT")
+
+            logged = log_to_audit_trail(
+                label=scenario_label, amount=selected_row["Amount"],
+                rf_score=rf_proba, anomaly_score=iso_score, combined_score=combined_proba,
+                action=action, actual_label="FRAUD" if selected_row["Class"] == 1 else "LEGIT",
+            )
+            if logged:
+                st.caption("✅ This assessment was logged to the audit trail.")
+            else:
+                st.caption("⚠️ Audit logging unavailable (assessment result above is still valid).")
 
             st.subheader("Recommended Action")
             getattr(st, action_color)(f"**{action}**")
