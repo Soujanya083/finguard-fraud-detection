@@ -6,6 +6,7 @@ import shap
 import matplotlib.pyplot as plt
 import sys
 import os
+import time
 from datetime import datetime
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import URL
@@ -16,7 +17,66 @@ from llm_narrative import generate_fraud_narrative
 
 load_dotenv(override=True)
 
-st.set_page_config(page_title="FinGuard - Fraud Detection", layout="wide")
+st.set_page_config(page_title="FinGuard - Fraud Detection", layout="wide", page_icon="🛡️")
+
+st.markdown("""
+<style>
+    @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&display=swap');
+
+    html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
+    h1, h2, h3 { font-family: 'Space Grotesk', sans-serif; color: #1A1F36; letter-spacing: -0.01em; }
+
+    .stApp { background-color: #FAFBFC; }
+
+    /* Metric cards: white surface, color-coded left border carries meaning, not decoration */
+    div[data-testid="stMetric"] {
+        background-color: #FFFFFF;
+        border: 1px solid #E3E7EF;
+        border-left: 3px solid #2563EB;
+        border-radius: 6px;
+        padding: 14px 18px;
+        box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+    }
+    div[data-testid="stMetricValue"] {
+        font-family: 'Space Grotesk', sans-serif;
+        font-variant-numeric: tabular-nums;
+        color: #1A1F36;
+    }
+    div[data-testid="stMetricLabel"] { color: #6B7280; font-weight: 500; font-size: 0.85rem; }
+
+    /* Tabs: blue underline on active */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 4px;
+        border-bottom: 1px solid #E3E7EF;
+    }
+    .stTabs [data-baseweb="tab"] {
+        color: #6B7280;
+        font-family: 'Space Grotesk', sans-serif;
+        font-weight: 600;
+        padding: 10px 18px;
+        background: transparent;
+    }
+    .stTabs [aria-selected="true"] {
+        color: #2563EB !important;
+        border-bottom: 2px solid #2563EB !important;
+    }
+
+    /* Buttons: blue accent, sharp not bubbly */
+    .stButton>button {
+        border-radius: 6px;
+        font-weight: 600;
+        border: 1px solid #2563EB;
+        color: #2563EB;
+    }
+    .stButton>button[kind="primary"] {
+        background-color: #2563EB;
+        color: #FFFFFF;
+        border: none;
+    }
+
+    div[data-testid="stAlert"] { border-radius: 6px; }
+</style>
+""", unsafe_allow_html=True)
 
 RF_WEIGHT = 0.7
 ISO_WEIGHT = 0.3
@@ -129,8 +189,10 @@ def get_combined_risk_score(X_input_scaled):
 
 
 st.title("🛡️ FinGuard — Fraud Detection System")
+st.caption("AI Risk Manager | Real-time transaction scoring, explainability, and human-in-the-loop review")
+st.markdown("")
 
-tab1, tab2, tab3 = st.tabs(["🔍 Transaction Assessment", "🎚️ Risk Threshold Simulator", "📋 Audit Log"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["🔍 Transaction Assessment", "🎚️ Risk Threshold Simulator", "📋 Audit Log", "🕵️ Investigator Queue", "📊 Fraud Analytics", "⚡ Live Feed Simulation"])
 
 # ============================================================
 # TAB 1: Transaction assessment (now using combined RF + Isolation Forest score)
@@ -347,6 +409,244 @@ with tab3:
                 s3.metric("Flagged for Review", (audit_df["recommended_action"].str.contains("review")).sum())
         except Exception as e:
             st.error(f"⚠️ Could not load audit log: {e}")
+
+# ============================================================
+# TAB 4: Investigator Queue (new) — human-in-the-loop review
+# ============================================================
+with tab4:
+    st.markdown(
+        "Transactions flagged for **manual review** wait here until an investigator makes a call. "
+        "This closes the loop: the model recommends, a human decides, and that decision is stored — "
+        "the foundation for future model retraining on real feedback."
+    )
+
+    if db_engine is None:
+        st.warning("⚠️ Database connection unavailable — cannot load the review queue.")
+    else:
+        try:
+            with db_engine.connect() as conn:
+                pending_df = pd.read_sql(
+                    text("""
+                        SELECT id, timestamp, transaction_label, amount, combined_score, actual_label
+                        FROM audit_log
+                        WHERE recommended_action LIKE '%%review%%' AND investigator_decision IS NULL
+                        ORDER BY timestamp DESC
+                    """),
+                    conn,
+                )
+        except Exception as e:
+            st.error(f"⚠️ Could not load review queue: {e}")
+            pending_df = pd.DataFrame()
+
+        if pending_df.empty:
+            st.success("✅ No transactions currently pending review.")
+            st.caption(
+                "Go assess a transaction in Tab 1 that lands in the 40–80% risk range "
+                "(recommended action: 'Flag for manual review') to populate this queue."
+            )
+        else:
+            st.info(f"**{len(pending_df)}** transaction(s) awaiting review.")
+            for _, row in pending_df.iterrows():
+                with st.container(border=True):
+                    c1, c2, c3 = st.columns([2, 1, 2])
+                    c1.markdown(f"**{row['transaction_label']}**  \n₹{row['amount']:.2f} · Risk: {row['combined_score']*100:.1f}%")
+                    c2.markdown(f"Ground truth:  \n**{row['actual_label']}**")
+                    with c3:
+                        b1, b2, b3 = st.columns(3)
+                        decide = None
+                        if b1.button("✅ Legit", key=f"legit_{row['id']}", use_container_width=True):
+                            decide = "Confirmed Legitimate"
+                        if b2.button("🚨 Fraud", key=f"fraud_{row['id']}", use_container_width=True):
+                            decide = "Confirmed Fraud"
+                        if b3.button("⏳ Escalate", key=f"esc_{row['id']}", use_container_width=True):
+                            decide = "Escalated"
+
+                        if decide:
+                            try:
+                                with db_engine.connect() as conn:
+                                    conn.execute(
+                                        text("""
+                                            UPDATE audit_log
+                                            SET investigator_decision = :decision, decided_at = NOW()
+                                            WHERE id = :id
+                                        """),
+                                        {"decision": decide, "id": int(row["id"])},
+                                    )
+                                    conn.commit()
+                                st.success(f"Recorded: {decide}")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"⚠️ Could not save decision: {e}")
+
+        # Show recently decided items too
+        try:
+            with db_engine.connect() as conn:
+                decided_df = pd.read_sql(
+                    text("""
+                        SELECT timestamp, transaction_label, amount, combined_score,
+                               investigator_decision, decided_at
+                        FROM audit_log
+                        WHERE investigator_decision IS NOT NULL
+                        ORDER BY decided_at DESC LIMIT 20
+                    """),
+                    conn,
+                )
+            if not decided_df.empty:
+                st.subheader("Recently Decided")
+                st.dataframe(decided_df, use_container_width=True)
+        except Exception:
+            pass
+
+# ============================================================
+# TAB 5: Fraud Analytics (new) — real SQL-driven business insights
+# ============================================================
+with tab5:
+    st.markdown(
+        "Business-question analytics computed directly via SQL against the `transactions_features` table — "
+        "the same real, held-out data used throughout this app."
+    )
+
+    if db_engine is None:
+        st.warning("⚠️ Database connection unavailable — cannot load analytics.")
+    else:
+        try:
+            with db_engine.connect() as conn:
+                # Query 1: Fraud rate by hour of day
+                hourly_df = pd.read_sql(
+                    text("""
+                        SELECT "Hour",
+                               COUNT(*) AS total_transactions,
+                               SUM(CASE WHEN "Class" = 1 THEN 1 ELSE 0 END) AS fraud_count,
+                               ROUND(100.0 * SUM(CASE WHEN "Class" = 1 THEN 1 ELSE 0 END) / COUNT(*), 3) AS fraud_rate_pct
+                        FROM transactions_features
+                        GROUP BY "Hour"
+                        ORDER BY "Hour"
+                    """),
+                    conn,
+                )
+
+                # Query 2: Fraud rate by amount bucket
+                amount_bucket_df = pd.read_sql(
+                    text("""
+                        SELECT
+                            CASE
+                                WHEN "Amount" < 10 THEN '₹0-10'
+                                WHEN "Amount" < 50 THEN '₹10-50'
+                                WHEN "Amount" < 100 THEN '₹50-100'
+                                WHEN "Amount" < 500 THEN '₹100-500'
+                                ELSE '₹500+'
+                            END AS amount_bucket,
+                            COUNT(*) AS total_transactions,
+                            SUM(CASE WHEN "Class" = 1 THEN 1 ELSE 0 END) AS fraud_count,
+                            ROUND(100.0 * SUM(CASE WHEN "Class" = 1 THEN 1 ELSE 0 END) / COUNT(*), 3) AS fraud_rate_pct
+                        FROM transactions_features
+                        GROUP BY amount_bucket
+                        ORDER BY MIN("Amount")
+                    """),
+                    conn,
+                )
+
+                # Query 3: Overall summary stats
+                summary_row = conn.execute(text("""
+                    SELECT COUNT(*) AS total,
+                           SUM(CASE WHEN "Class" = 1 THEN 1 ELSE 0 END) AS frauds,
+                           ROUND(AVG("Amount")::numeric, 2) AS avg_amount,
+                           ROUND(AVG(CASE WHEN "Class" = 1 THEN "Amount" END)::numeric, 2) AS avg_fraud_amount
+                    FROM transactions_features
+                """)).fetchone()
+
+            s1, s2, s3, s4 = st.columns(4)
+            s1.metric("Total Transactions", f"{summary_row[0]:,}")
+            s2.metric("Total Frauds", f"{summary_row[1]:,}")
+            s3.metric("Avg Transaction", f"₹{summary_row[2]:.2f}")
+            s4.metric("Avg Fraud Amount", f"₹{summary_row[3]:.2f}")
+
+            st.subheader("Fraud Rate by Hour of Day")
+            st.bar_chart(hourly_df.set_index("Hour")["fraud_rate_pct"])
+            peak_hour = hourly_df.loc[hourly_df["fraud_rate_pct"].idxmax()]
+            st.caption(
+                f"Highest fraud rate: **{int(peak_hour['Hour'])}:00** at {peak_hour['fraud_rate_pct']:.2f}% "
+                f"({int(peak_hour['fraud_count'])} of {int(peak_hour['total_transactions'])} transactions that hour)."
+            )
+            with st.expander("View raw query results"):
+                st.dataframe(hourly_df, use_container_width=True)
+
+            st.subheader("Fraud Rate by Transaction Amount")
+            st.bar_chart(amount_bucket_df.set_index("amount_bucket")["fraud_rate_pct"])
+            with st.expander("View raw query results"):
+                st.dataframe(amount_bucket_df, use_container_width=True)
+
+            st.caption(
+                "All figures computed live via SQL (GROUP BY, aggregate functions) against the full "
+                "284,807-transaction dataset — not a sample."
+            )
+        except Exception as e:
+            st.error(f"⚠️ Could not load analytics: {e}")
+
+# ============================================================
+# TAB 6: Live Feed Simulation (new) — SIMULATED, clearly labeled
+# ============================================================
+with tab6:
+    st.markdown(
+        "**⚠️ Simulation, not live production traffic.** This dataset is a static, historical snapshot "
+        "with no connected real-time transaction stream. To demonstrate how FinGuard would behave against "
+        "incoming transactions, this replays real held-out test transactions one at a time with a short "
+        "delay, using each one's actual (precomputed) Random Forest score."
+    )
+
+    if test_preds_df is None or test_preds_df.empty:
+        st.warning("⚠️ Test predictions file not found — cannot run simulation.")
+    else:
+        n_txns = st.slider("Number of transactions to simulate", 5, 50, 15)
+        speed = st.select_slider("Speed", options=["Slow", "Normal", "Fast"], value="Normal")
+        delay = {"Slow": 1.0, "Normal": 0.4, "Fast": 0.1}[speed]
+
+        if st.button("▶ Start Simulation", type="primary"):
+            sample = test_preds_df.sample(n_txns).reset_index(drop=True)
+
+            progress = st.progress(0)
+            stats_placeholder = st.empty()
+            table_placeholder = st.empty()
+
+            processed_rows = []
+            approved, review, blocked, frauds_caught = 0, 0, 0, 0
+
+            for i, row in sample.iterrows():
+                proba = row["y_pred_proba"]
+                if proba >= 0.80:
+                    action = "🚫 Block"
+                    blocked += 1
+                elif proba >= 0.40:
+                    action = "🔎 Review"
+                    review += 1
+                else:
+                    action = "✅ Approve"
+                    approved += 1
+
+                if row["y_true"] == 1 and proba >= 0.40:
+                    frauds_caught += 1
+
+                processed_rows.append({
+                    "Amount": f"₹{row['Amount']:.2f}",
+                    "Risk Score": f"{proba*100:.1f}%",
+                    "Action": action,
+                    "Actual": "FRAUD" if row["y_true"] == 1 else "legit",
+                })
+
+                with stats_placeholder.container():
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("Processed", i + 1)
+                    c2.metric("Auto-approved", approved)
+                    c3.metric("Flagged/Blocked", review + blocked)
+                    c4.metric("Frauds Caught", frauds_caught)
+
+                table_placeholder.dataframe(
+                    pd.DataFrame(processed_rows).iloc[::-1], use_container_width=True
+                )
+                progress.progress((i + 1) / n_txns)
+                time.sleep(delay)
+
+            st.success(f"Simulation complete — {n_txns} transactions processed in real time.")
 
 st.markdown("---")
 st.caption("FinGuard | Track 2: AI Risk Manager | Risk Score: 0.7×Random Forest + 0.3×Isolation Forest | AI narrative: Google Gemini")
