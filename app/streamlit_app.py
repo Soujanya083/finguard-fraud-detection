@@ -24,18 +24,15 @@ ISO_WEIGHT = 0.3
 # --- DB connection for audit logging (separate, lightweight, non-fatal if it fails) ---
 @st.cache_resource
 def get_db_engine():
-    try:
-        url = URL.create(
-            "postgresql+psycopg2",
-            username=os.environ.get("DB_USER", "postgres"),
-            password=os.environ["DB_PASSWORD"],
-            host=os.environ.get("DB_HOST", "localhost"),
-            port=os.environ.get("DB_PORT", "5432"),
-            database=os.environ.get("DB_NAME", "finguard_db"),
-        )
-        return create_engine(url)
-    except Exception:
-        return None
+    url = URL.create(
+        "postgresql+psycopg2",
+        username=os.environ.get("DB_USER", "postgres"),
+        password=os.environ["DB_PASSWORD"],
+        host=os.environ.get("DB_HOST", "localhost"),
+        port=os.environ.get("DB_PORT", "5432"),
+        database=os.environ.get("DB_NAME", "finguard_db"),
+    )
+    return create_engine(url)
 
 db_engine = get_db_engine()
 
@@ -133,7 +130,7 @@ def get_combined_risk_score(X_input_scaled):
 
 st.title("🛡️ FinGuard — Fraud Detection System")
 
-tab1, tab2 = st.tabs(["🔍 Transaction Assessment", "🎚️ Risk Threshold Simulator"])
+tab1, tab2, tab3 = st.tabs(["🔍 Transaction Assessment", "🎚️ Risk Threshold Simulator", "📋 Audit Log"])
 
 # ============================================================
 # TAB 1: Transaction assessment (now using combined RF + Isolation Forest score)
@@ -314,6 +311,42 @@ with tab2:
             "₹150/review is a stated assumption, not derived from real cost data. "
             "Currency shown as ₹ for illustration; the source dataset does not specify a currency."
         )
+
+# ============================================================
+# TAB 3: Audit Log (new) — shows every logged risk assessment
+# ============================================================
+with tab3:
+    st.markdown(
+        "Every assessment made in the **Transaction Assessment** tab is logged here — "
+        "timestamp, scores, and the action taken. This is what a real risk system needs "
+        "for compliance and later review: a record of every decision, not just the final one."
+    )
+
+    if db_engine is None:
+        st.warning("⚠️ Database connection unavailable — cannot load audit log.")
+    else:
+        try:
+            with db_engine.connect() as conn:
+                audit_df = pd.read_sql(
+                    text("SELECT timestamp, transaction_label, amount, rf_score, anomaly_score, "
+                         "combined_score, recommended_action, actual_label FROM audit_log "
+                         "ORDER BY timestamp DESC LIMIT 100"),
+                    conn,
+                )
+            if audit_df.empty:
+                st.info("No assessments logged yet — go make one in the Transaction Assessment tab.")
+            else:
+                st.dataframe(audit_df, use_container_width=True)
+                st.caption(f"Showing the {len(audit_df)} most recent logged assessment(s).")
+
+                # Quick summary stats
+                st.subheader("Summary")
+                s1, s2, s3 = st.columns(3)
+                s1.metric("Total Logged Assessments", len(audit_df))
+                s2.metric("Auto-blocked", (audit_df["recommended_action"].str.contains("block")).sum())
+                s3.metric("Flagged for Review", (audit_df["recommended_action"].str.contains("review")).sum())
+        except Exception as e:
+            st.error(f"⚠️ Could not load audit log: {e}")
 
 st.markdown("---")
 st.caption("FinGuard | Track 2: AI Risk Manager | Risk Score: 0.7×Random Forest + 0.3×Isolation Forest | AI narrative: Google Gemini")
