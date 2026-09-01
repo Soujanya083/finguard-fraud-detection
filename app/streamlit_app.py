@@ -163,9 +163,20 @@ def load_test_predictions():
     except Exception:
         return None
 
+@st.cache_data
+def load_full_dataset():
+    if db_engine is None:
+        return None
+    try:
+        with db_engine.connect() as conn:
+            return pd.read_sql("SELECT * FROM transactions_features", conn)
+    except Exception:
+        return None
+
 model, scaler, iso_forest, iso_score_scaler, pca_col_idx = load_model()
 samples_df = load_samples()
 test_preds_df = load_test_predictions()
+full_dataset_df = load_full_dataset()
 
 feature_cols = ['V1','V2','V3','V4','V5','V6','V7','V8','V9','V10','V11','V12','V13','V14',
                  'V15','V16','V17','V18','V19','V20','V21','V22','V23','V24','V25','V26','V27','V28',
@@ -192,7 +203,7 @@ st.title("🛡️ FinGuard — Fraud Detection System")
 st.caption("AI Risk Manager | Real-time transaction scoring, explainability, and human-in-the-loop review")
 st.markdown("")
 
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["🔍 Transaction Assessment", "🎚️ Risk Threshold Simulator", "📋 Audit Log", "🕵️ Investigator Queue", "📊 Fraud Analytics", "⚡ Live Feed Simulation"])
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["🔍 Transaction Assessment", "🎚️ Risk Threshold Simulator", "📋 Audit Log", "🕵️ Investigator Queue", "📊 Fraud Analytics", "⚡ Live Feed Simulation", "📁 Batch Scoring"])
 
 # ============================================================
 # TAB 1: Transaction assessment (now using combined RF + Isolation Forest score)
@@ -647,6 +658,96 @@ with tab6:
                 time.sleep(delay)
 
             st.success(f"Simulation complete — {n_txns} transactions processed in real time.")
+
+# ============================================================
+# TAB 7: Batch Scoring (new) — score REAL data, not preset scenarios
+# ============================================================
+with tab7:
+    st.markdown(
+        "Score transactions in bulk — either the **full held-out test set** (56,962 real transactions, "
+        "not a curated sample) or your **own uploaded CSV**. This is the actual model and scaler running "
+        "against real feature data, the same way a production batch job would."
+    )
+
+    source = st.radio(
+        "Data source",
+        ["Full held-out test set (real, all 56,962 transactions)", "Upload my own CSV"],
+        horizontal=False,
+    )
+
+    batch_df = None
+
+    if source.startswith("Full"):
+        if full_dataset_df is None:
+            st.warning("⚠️ Could not load the full dataset from the database.")
+        else:
+            n_rows = st.slider("How many transactions to score (for speed)", 100, 5000, 1000, step=100)
+            if st.button("▶ Score Test Set Sample", type="primary"):
+                batch_df = full_dataset_df.sample(n_rows).reset_index(drop=True)
+    else:
+        uploaded = st.file_uploader(
+            "Upload a CSV with the same columns as the training features "
+            "(V1-V28, Hour, Amount, etc. — see `data/raw/creditcard.csv` for the expected format)",
+            type="csv",
+        )
+        if uploaded is not None:
+            try:
+                batch_df = pd.read_csv(uploaded)
+                st.success(f"Loaded {len(batch_df)} rows from your file.")
+            except Exception as e:
+                st.error(f"⚠️ Could not read CSV: {e}")
+
+    if batch_df is not None:
+        missing = [c for c in feature_cols if c not in batch_df.columns]
+        if missing:
+            st.error(f"⚠️ Uploaded/selected data is missing required columns: {', '.join(missing)}")
+        else:
+            with st.spinner(f"Scoring {len(batch_df)} transactions..."):
+                try:
+                    X_batch = batch_df[feature_cols]
+                    X_batch_scaled = scaler.transform(X_batch)
+                    rf_scores = model.predict_proba(X_batch_scaled)[:, 1]
+
+                    X_batch_pca = X_batch_scaled[:, pca_col_idx]
+                    iso_raw = -iso_forest.decision_function(X_batch_pca)
+                    iso_scores = iso_score_scaler.transform(iso_raw.reshape(-1, 1)).flatten()
+                    iso_scores = np.clip(iso_scores, 0, 1)
+
+                    combined_scores = (RF_WEIGHT * rf_scores) + (ISO_WEIGHT * iso_scores)
+
+                    results_df = batch_df.copy()
+                    results_df["risk_score"] = combined_scores
+                    results_df["action"] = pd.cut(
+                        combined_scores, bins=[-0.01, 0.40, 0.80, 1.01],
+                        labels=["Approve", "Review", "Block"],
+                    )
+
+                    st.subheader("Results")
+                    r1, r2, r3, r4 = st.columns(4)
+                    r1.metric("Total Scored", f"{len(results_df):,}")
+                    r2.metric("Auto-approved", f"{(results_df['action'] == 'Approve').sum():,}")
+                    r3.metric("Flagged for Review", f"{(results_df['action'] == 'Review').sum():,}")
+                    r4.metric("Auto-blocked", f"{(results_df['action'] == 'Block').sum():,}")
+
+                    if "Class" in results_df.columns:
+                        true_frauds = (results_df["Class"] == 1).sum()
+                        caught = ((results_df["Class"] == 1) & (results_df["action"] != "Approve")).sum()
+                        st.info(f"Of **{true_frauds}** actual frauds in this batch, **{caught}** were flagged for review or blocked ({caught/true_frauds*100:.1f}% caught)." if true_frauds > 0 else "No confirmed frauds in this batch.")
+
+                    display_cols = ["Amount", "risk_score", "action"] + (["Class"] if "Class" in results_df.columns else [])
+                    st.dataframe(
+                        results_df[display_cols].sort_values("risk_score", ascending=False).head(200),
+                        use_container_width=True,
+                    )
+                    st.caption("Showing top 200 by risk score. Download full results below.")
+
+                    csv_out = results_df.to_csv(index=False).encode("utf-8")
+                    st.download_button(
+                        "⬇ Download full results as CSV", csv_out,
+                        "finguard_batch_results.csv", "text/csv",
+                    )
+                except Exception as e:
+                    st.error(f"⚠️ Batch scoring failed: {e}")
 
 st.markdown("---")
 st.caption("FinGuard | Track 2: AI Risk Manager | Risk Score: 0.7×Random Forest + 0.3×Isolation Forest | AI narrative: Google Gemini")
