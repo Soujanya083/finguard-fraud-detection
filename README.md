@@ -1,154 +1,544 @@
-# 🛡️ FinGuard — AI-Powered Fraud Risk Manager
+🛡️ FinGuard — AI-Powered Fraud Risk Manager
 
-**Razorpay AI Buildathon 2026 — Track 2: AI Risk Manager**
+FinGuard is an end-to-end fraud detection and risk management system that scores transactions for fraud risk, explains why a transaction was flagged using SHAP, and recommends a specific action — approve, review, or block.
 
-FinGuard is an end-to-end fraud detection system that scores incoming transactions for fraud risk, explains *why* a transaction was flagged using SHAP, and recommends a specific action (auto-approve, manual review, or auto-block) — not just a probability number.
-
----
-
-## The Problem
-
-Payment platforms process thousands of transactions where a small fraction are fraudulent. Two failure modes cost money either way:
-- **Miss a fraud** → direct financial loss
-- **Wrongly flag a legitimate transaction** → customer friction, support cost, lost trust
-
-A useful risk system has to do more than predict — it needs to explain its reasoning (for audit/trust) and translate a score into a concrete next action.
-
-## What FinGuard Does
-
-```
-Transaction → Feature Engineering → ML Risk Model → Risk Score
-                                                          ↓
-                                        SHAP Explanation (why this score?)
-                                                          ↓
-                                   Recommended Action (approve / review / block)
-```
-
-1. **Data & SQL layer**: Transactions are stored in PostgreSQL; feature engineering and querying happen via SQL, not just pandas.
-2. **Model**: 6 models were trained and compared (Logistic Regression, Decision Tree, Random Forest, 2x XGBoost variants, LightGBM). The best performer, a **tuned Random Forest**, was selected via `RandomizedSearchCV` optimizing PR-AUC (the right metric for a ~0.17%-fraud, heavily imbalanced dataset).
-3. **Explainability**: Real `shap.TreeExplainer` — both global feature importance and per-transaction explanations, not a stand-in.
-4. **Product**: A working Streamlit app lets you pick a real, held-out transaction and see its live risk score, SHAP explanation, and recommended action.
-5. **Business case**: False-positive cost and fraud-prevented value are calculated directly from the confusion matrix on the held-out test set.
-
-## Dataset
-
-[Kaggle's Credit Card Fraud Detection dataset](https://www.kaggle.com/mlg-ulb/creditcardfraud) — 284,807 real anonymized transactions, 492 confirmed frauds (~0.17%). Features V1–V28 are PCA-anonymized for privacy by the original dataset publisher; `Amount` and `Time` are the only non-anonymized fields. This is a real public dataset, not synthetic data.
-
-**Note on currency**: the dataset does not specify a currency for the `Amount` field. This project displays amounts with a ₹ symbol for illustrative purposes only — treat all monetary figures below as relative/illustrative, not literal INR values.
-
-## Results (Tuned Random Forest, held-out test set)
-
-| Metric | Value |
-|---|---|
-| Precision (Fraud class) | 0.71 |
-| Recall (Fraud class) | 0.79 |
-| F1 (Fraud class) | 0.75 |
-| ROC-AUC | 0.983 |
-| PR-AUC | 0.802 |
-| False Positives | 22 |
-| False Negatives | 16 |
-
-## Testing & Evaluation Methodology
-
-- **Train/test split**: Chronological, not random — data was sorted by transaction `Time`, with the first 80% used for training and the final 20% held out for testing. A random split would let the model implicitly learn from transactions that happen *after* the ones it's being tested on, which doesn't reflect how a fraud system actually operates in production (it only ever sees the past). This is a deliberate choice, not an oversight.
-- **Why PR-AUC over accuracy**: With fraud at ~0.17% of transactions, a model predicting "not fraud" for everything would still be 99.8% accurate — and useless. Precision-Recall AUC was used as the primary model-selection metric during hyperparameter search instead, since it reflects performance specifically on the minority (fraud) class.
-- **Why Random Forest over the alternatives tested**: Six models were compared (Logistic Regression, Decision Tree, Random Forest, two XGBoost configurations, LightGBM) on identical train/test splits. The tuned Random Forest achieved the best PR-AUC (0.802) while remaining fast enough for real-time single-transaction scoring in the dashboard — a relevant practical constraint, not just a leaderboard number.
-- **Class imbalance handling**: SMOTE (Synthetic Minority Oversampling) was applied to the training set only — never to the test set, to avoid leaking synthetic patterns into evaluation. `scale_pos_weight`-based class weighting was also tested as an alternative approach on some models (XGBoost) for comparison.
-- **Hyperparameter tuning**: `RandomizedSearchCV` with PR-AUC as the scoring metric, cross-validated on the training set only, to avoid tuning against the same data used for final evaluation.
-
-## Business Impact (held-out test set, illustrative)
-
-Using the confusion matrix above and an assumed ₹150 cost per false-positive review:
-
-| | Amount |
-|---|---|
-| Fraud successfully caught | ₹5,090.99 |
-| Fraud missed | ₹2,638.27 |
-| False-positive review cost (22 × ₹150) | ₹3,300.00 |
-| **Net benefit** | **₹1,790.99** |
-
-*The ₹150-per-false-positive figure is an assumption (estimated manual review/support cost), not derived from the dataset — stated explicitly rather than presented as fact.* Framed as a ratio (scale-independent): **for every ₹1 spent on false-positive reviews, the model recovers ~₹1.54 in caught fraud.**
-
-## Architecture & Tech Stack
-
-- **Data storage**: PostgreSQL (SQL queries for feature engineering, not just pandas)
-- **ML**: scikit-learn, XGBoost, LightGBM, imbalanced-learn (SMOTE)
-- **Explainability**: SHAP (`TreeExplainer`)
-- **Dashboard**: Streamlit
-- **Environment/secrets**: python-dotenv (`.env`, gitignored — never hardcoded credentials)
-
-## How to Run
-
-1. Clone this repo and install dependencies:
-   ```
-   pip install -r requirements.txt
-   ```
-2. Create a `.env` file in the project root (see `.env.example`) with your PostgreSQL credentials.
-3. Load the raw dataset into PostgreSQL:
-   ```
-   python src/data_pipeline.py
-   ```
-4. Run the notebooks in order (`01_eda.ipynb` → `02_feature_engineering.ipynb` → `03_modeling.ipynb`) to reproduce the full pipeline, or use the pre-trained model in `models/`.
-5. Generate demo scenarios and launch the dashboard:
-   ```
-   python src/extract_samples.py
-   streamlit run app/streamlit_app.py
-   ```
-
-## Limitations & What I'd Do Differently at Scale
-
-- V1-V28 features are PCA-anonymized by the dataset publisher — real deployment would use interpretable raw features (merchant category, device fingerprint, IP geolocation, etc.) for richer, more actionable SHAP explanations.
-- The ₹150 false-positive cost is a stated assumption, not derived from real operational data — a production system would calibrate this from actual support/review costs.
-- `Txn_Count_Last_Hour` (a velocity feature) can't be computed live for a single new transaction in the current demo without a running transaction stream — it's approximated. A production system would maintain a real-time rolling window per account.
-- Action thresholds (80%/40%) are illustrative starting points, not tuned against a real cost-benefit curve.
-
-## Author
-
-Built by Soujanya U as a submission for Razorpay AI Buildathon 2026, Track 2 (AI Risk Manager).
-
-## Exploratory Work: Unsupervised Anomaly Detection
-
-As an extension beyond the core supervised model, an Isolation Forest (unsupervised anomaly detection) was trained and evaluated as a potential complementary signal — the idea being that a supervised model can only catch fraud patterns similar to what it was trained on, while anomaly detection might catch genuinely novel patterns by flagging statistical outliers instead.
-
-**Result:** Isolation Forest significantly underperformed the supervised Random Forest on this dataset — catching only 1 of 75 fraud cases in the held-out test set (recall ≈ 1%), even when restricted to just the PCA features (V1–V28) most associated with fraud per the SHAP analysis. This was tested, not assumed.
-
-**Interpretation:** this suggests the fraud patterns in this dataset are consistent and learnable from labeled examples, rather than being genuine statistical outliers in the raw feature space — which is what unsupervised anomaly detection is designed to catch. In other words, this fraud "looks like" fraud the model has seen before, not like generically unusual behavior.
-
-**Decision:** based on this finding, Isolation Forest was **not** wired into the live dashboard or used in the final risk score — including a component that adds noise rather than signal would make the system less reliable, not more. This is documented here as a deliberate, evidence-based modeling decision rather than an unexplored gap. In a real deployment with different/richer features (e.g. device fingerprint, IP geolocation, merchant behavior), anomaly detection may perform differently and would be worth revisiting.
-
-
-## Updated Results Section (replace the existing "Results" table with this)
-
-## Results (held-out test set)
-
-Two model configurations were evaluated. The live dashboard uses the **combined model**.
-
-| Metric | Random Forest only | Combined (0.7 × RF + 0.3 × Isolation Forest) |
-|---|---|---|
-| Precision (Fraud class) | 0.71 | 0.628 |
-| Recall (Fraud class) | 0.79 | 0.787 |
-| ROC-AUC | 0.983 | — |
-| PR-AUC | 0.802 | — |
-
-**Why the combined model, despite lower precision at this specific threshold comparison?** The blend weight (0.7/0.3) was chosen by testing multiple weightings against the held-out test set and measuring the actual precision/recall trade-off at each (see `03_modeling.ipynb` for the full comparison across weights 1.0→0.5). A small Isolation Forest contribution (30%) improved precision meaningfully over a naive 50/50 blend, while keeping recall within a point of the RF-only model. The two "Precision" figures above aren't directly comparable line-for-line since they reflect different score distributions at the same 0.40 threshold — full methodology and the weight-comparison table are in the notebook.
+The project combines machine learning, SQL-based feature engineering, explainable AI, anomaly detection, business-impact analysis, a Streamlit dashboard, and a FastAPI prediction API.
 
 ---
 
-## Replace the existing "Exploratory Work: Unsupervised Anomaly Detection" section with this
+The Problem
 
-## Anomaly Detection: Isolation Forest
+Payment platforms process thousands of transactions where only a small fraction may be fraudulent. Both types of mistakes can be costly:
 
-An Isolation Forest (unsupervised anomaly detection) was trained and evaluated as a complementary signal to the supervised Random Forest — the idea being that a supervised model can only catch fraud patterns similar to what it was trained on, while anomaly detection might catch novel patterns by flagging statistical outliers.
+- Miss a fraud → direct financial loss
+- Wrongly flag a legitimate transaction → customer friction, support cost, and lost trust
 
-**Standalone performance:** used alone, Isolation Forest performed poorly on this dataset — catching only 1 of 75 fraud cases in the test set (recall ≈ 1%), even restricted to the PCA features most associated with fraud per the SHAP analysis. This suggests the fraud patterns here are consistent and learnable from labeled examples, rather than being genuine statistical outliers in the raw feature space.
+A useful fraud-risk system should therefore do more than produce a probability. It should explain the prediction and translate the risk score into a practical action.
 
-**Blended performance:** rather than discard this, its score was tested as a *small* weighted contribution alongside the Random Forest's probability, at several blend weights:
+---
 
-| RF weight | Isolation Forest weight | Precision | Recall |
-|---|---|---|---|
-| 1.0 | 0.0 (baseline) | 0.448 | 0.800 |
-| 0.9 | 0.1 | 0.526 | 0.800 |
-| **0.7** | **0.3** | **0.628** | **0.787** |
-| 0.5 | 0.5 | 0.431 | 0.787 |
+What FinGuard Does
 
-At a small weight (30%), the anomaly score improved precision meaningfully with negligible recall cost — likely acting as a tie-breaker on borderline cases rather than driving predictions outright. At a heavy 50/50 blend, performance degrades, confirming the earlier finding that Isolation Forest alone is a weak signal on this dataset. **The live dashboard uses the 0.7/0.3 blend**, and displays both component scores separately (not just the combined number) so the contribution of each model stays transparent rather than hidden inside a single opaque score.
+Transaction
+     ↓
+Feature Engineering
+     ↓
+Random Forest Risk Model
+     ↓
+Risk Score
+     ↓
+SHAP Explanation
+     ↓
+Risk Decision
+Approve / Review / Block
+
+1. Data & SQL Layer
+
+Transactions are processed using PostgreSQL, with SQL queries used for data preparation, feature engineering, and analysis alongside Python-based processing.
+
+2. Machine Learning
+
+Six classification approaches were evaluated:
+
+- Logistic Regression
+- Decision Tree
+- Random Forest
+- XGBoost
+- XGBoost with an alternative configuration
+- LightGBM
+
+A tuned Random Forest was selected as the primary supervised model based on Precision-Recall AUC (PR-AUC), which is more appropriate than accuracy for this highly imbalanced fraud dataset.
+
+3. Explainable AI
+
+FinGuard uses real SHAP TreeExplainer analysis to explain individual predictions and identify which features increase or decrease fraud risk.
+
+4. Anomaly Detection
+
+An Isolation Forest was evaluated as an unsupervised anomaly-detection model and tested as a complementary signal alongside the Random Forest.
+
+5. Risk Decision
+
+The final risk score is translated into an operational decision:
+
+Risk Score| Risk Level| Decision
+< 40%| LOW| APPROVE
+40%–79.99%| MEDIUM| REVIEW
+≥ 80%| HIGH| BLOCK
+
+6. Product Layer
+
+A working Streamlit dashboard allows users to select transactions and view their risk score, model outputs, SHAP explanations, and recommended action.
+
+A FastAPI backend provides the same risk-scoring capability through an API endpoint.
+
+7. Business Impact
+
+The project also estimates the financial impact of fraud caught, fraud missed, and false-positive review costs using the held-out test-set results.
+
+---
+
+Dataset
+
+FinGuard uses the public Credit Card Fraud Detection dataset from Kaggle:
+
+https://www.kaggle.com/mlg-ulb/creditcardfraud
+
+The dataset contains:
+
+- 284,807 transactions
+- 492 confirmed fraud cases
+- Fraud rate of approximately 0.17%
+- "V1"–"V28": PCA-anonymized numerical features
+- "Amount": transaction amount
+- "Time": elapsed time between transactions
+
+This is a real public dataset rather than synthetic data.
+
+Note on Currency
+
+The original dataset does not specify a currency for the "Amount" field. Any ₹ values shown in the business-impact analysis are therefore illustrative only and should not be interpreted as literal INR values.
+
+---
+
+Results — Tuned Random Forest
+
+The primary Random Forest model was evaluated on a completely held-out test set.
+
+Metric| Value
+Precision (Fraud class)| 0.71
+Recall (Fraud class)| 0.79
+F1 Score (Fraud class)| 0.75
+ROC-AUC| 0.983
+PR-AUC| 0.802
+False Positives| 22
+False Negatives| 16
+
+---
+
+Testing & Evaluation Methodology
+
+Chronological Train/Test Split
+
+The dataset was sorted by transaction "Time".
+
+- First 80% → training data
+- Final 20% → held-out test data
+
+A chronological split better reflects a real fraud-detection scenario because a production system learns from past transactions and predicts future ones.
+
+Why PR-AUC?
+
+Fraud represents only around 0.17% of the dataset.
+
+A model that predicted every transaction as legitimate could achieve extremely high accuracy while detecting no fraud at all.
+
+Therefore, Precision-Recall AUC (PR-AUC) was used as the primary model-selection metric because it focuses on performance on the minority fraud class.
+
+Class Imbalance Handling
+
+SMOTE (Synthetic Minority Oversampling Technique) was applied only to the training data.
+
+The test set was kept untouched to avoid leaking synthetic information into the evaluation.
+
+Class-weighting approaches such as "scale_pos_weight" were also tested on selected XGBoost configurations.
+
+Hyperparameter Tuning
+
+"RandomizedSearchCV" was used for hyperparameter tuning with PR-AUC as the optimization metric.
+
+The tuning process was performed using training data only, keeping the final test set independent for evaluation.
+
+---
+
+Combined Model Evaluation
+
+In addition to the supervised Random Forest, an Isolation Forest was evaluated as an anomaly-detection signal.
+
+The final Streamlit dashboard uses a weighted combination:
+
+Final Risk Score =
+0.7 × Random Forest Score
++
+0.3 × Isolation Forest Score
+
+The tested configurations were:
+
+Random Forest Weight| Isolation Forest Weight| Precision| Recall
+1.0| 0.0| 0.448| 0.800
+0.9| 0.1| 0.526| 0.800
+0.7| 0.3| 0.628| 0.787
+0.5| 0.5| 0.431| 0.787
+
+The 0.7/0.3 configuration provided the strongest precision among the tested blends while keeping recall close to the Random Forest baseline.
+
+The complete comparison is documented in "notebooks/03_modeling.ipynb".
+
+---
+
+Anomaly Detection — Isolation Forest
+
+Isolation Forest was evaluated to determine whether unsupervised anomaly detection could identify unusual transactions that may not follow previously learned fraud patterns.
+
+Standalone Performance
+
+When used alone, Isolation Forest performed poorly on this dataset, detecting only 1 of 75 fraud cases in the held-out test set, corresponding to approximately 1% recall.
+
+This indicates that the fraud patterns in this dataset are more effectively learned through supervised classification than through generic anomaly detection.
+
+Why Keep It as a Supporting Signal?
+
+Although Isolation Forest was weak as a standalone model, its score was tested as a smaller contribution alongside the Random Forest.
+
+The 30% contribution provided a better precision/recall trade-off than the tested 50/50 configuration.
+
+The dashboard therefore uses the 0.7/0.3 blend while displaying the component model scores separately for transparency.
+
+---
+
+SHAP Explainability
+
+FinGuard uses SHAP (SHapley Additive exPlanations) to explain individual predictions.
+
+For each transaction, the system identifies the features that contribute most strongly to the predicted risk.
+
+A SHAP value can:
+
+- Increase risk → pushes the prediction toward fraud
+- Decrease risk → pushes the prediction toward legitimate
+
+This makes the model output more interpretable than simply displaying a fraud probability.
+
+---
+
+Business Impact
+
+Using the Random Forest confusion matrix from the held-out test set and an illustrative assumption of ₹150 per false-positive manual review:
+
+Business Measure| Amount
+Fraud successfully caught| ₹5,090.99
+Fraud missed| ₹2,638.27
+False-positive review cost| ₹3,300.00
+Net benefit| ₹1,790.99
+
+The ₹150 review cost is an explicit assumption rather than a value derived from the dataset.
+
+Expressed as a scale-independent ratio:
+
+For every ₹1 spent on false-positive reviews, the model recovers approximately ₹1.54 in caught fraud.
+
+---
+
+FastAPI Prediction API
+
+FinGuard includes a FastAPI backend for programmatic fraud-risk scoring.
+
+The API accepts either:
+
+- Raw transaction features: "Time", "V1"–"V28", and "Amount"
+- The complete engineered feature set
+- An optional "Txn_Count_Last_Hour" value
+
+For raw transactions, the API performs the required feature engineering before prediction.
+
+Feature Engineering
+
+The API calculates:
+
+- Hour
+- High-risk-hour indicator
+- Log-transformed amount
+- Amount Z-score
+- Round-amount indicator
+- Transaction velocity
+
+The processed features are then passed through the saved scaler and Random Forest model.
+
+API Endpoints
+
+Health Check
+
+GET /health
+
+Returns the availability of the trained model, scaler, Isolation Forest, and SHAP functionality.
+
+Fraud Prediction
+
+POST /predict
+
+Returns:
+
+- Fraud risk score
+- Risk percentage
+- Risk level
+- Recommended decision
+- SHAP explanation
+- Model availability information
+
+Run the API
+
+Install API dependencies:
+
+pip install -r api/requirements.txt
+
+Start the FastAPI server:
+
+uvicorn api.main:app --reload
+
+The API runs locally at:
+
+http://127.0.0.1:8000
+
+Interactive Swagger documentation:
+
+http://127.0.0.1:8000/docs
+
+---
+
+API Validation
+
+The API was tested using three representative transaction scenarios:
+
+Scenario| Risk Score| Risk Level| Decision
+Normal transaction| 1.47%| LOW| APPROVE
+Suspicious legitimate transaction| 43.23%| MEDIUM| REVIEW
+Real fraud transaction| 92.11%| HIGH| BLOCK
+
+Automated "pytest" tests were also implemented to verify the health endpoint and risk-decision logic.
+
+---
+
+Streamlit Dashboard
+
+The Streamlit application provides an interactive interface for exploring fraud-risk predictions.
+
+The dashboard can display:
+
+- Transaction information
+- Random Forest risk score
+- Isolation Forest score
+- Combined risk score
+- Risk level
+- Recommended action
+- SHAP feature contributions
+
+Run the dashboard with:
+
+streamlit run app/streamlit_app.py
+
+---
+
+Architecture & Tech Stack
+
+Data
+
+- PostgreSQL
+- SQL
+- Pandas
+- NumPy
+
+Machine Learning
+
+- Scikit-learn
+- Random Forest
+- Isolation Forest
+- XGBoost
+- LightGBM
+- imbalanced-learn / SMOTE
+
+Explainability
+
+- SHAP
+- TreeExplainer
+
+Backend
+
+- FastAPI
+- Uvicorn
+- Pydantic
+
+Dashboard
+
+- Streamlit
+
+Testing & Development
+
+- Pytest
+- GitHub Actions
+- Jupyter Notebook
+- Python-dotenv
+
+---
+
+Project Structure
+
+finguard-fraud-detection/
+│
+├── api/
+│   ├── main.py
+│   ├── requirements.txt
+│   └── README.md
+│
+├── app/
+│   └── streamlit_app.py
+│
+├── data/
+│   ├── raw/
+│   └── processed/
+│
+├── notebooks/
+│   ├── 01_eda.ipynb
+│   ├── 02_feature_engineering.ipynb
+│   └── 03_modeling.ipynb
+│
+├── reports/
+│
+├── src/
+│   ├── data_pipeline.py
+│   ├── extract_samples.py
+│   └── ...
+│
+├── tests/
+│   ├── test_finguard.py
+│   └── test_api.py
+│
+├── .github/
+│   └── workflows/
+│       └── tests.yml
+│
+├── .gitignore
+├── README.md
+└── requirements.txt
+
+---
+
+How to Run
+
+1. Clone the repository
+
+git clone https://github.com/Soujanya083/finguard-fraud-detection.git
+cd finguard-fraud-detection
+
+2. Install dependencies
+
+pip install -r requirements.txt
+
+3. Configure PostgreSQL
+
+Create a ".env" file in the project root using the required PostgreSQL configuration.
+
+Credentials are kept outside the source code and are excluded from Git tracking.
+
+4. Load and process the data
+
+python src/data_pipeline.py
+
+5. Reproduce the modeling pipeline
+
+Run the notebooks in order:
+
+01_eda.ipynb
+      ↓
+02_feature_engineering.ipynb
+      ↓
+03_modeling.ipynb
+
+Alternatively, the existing trained model artifacts can be used for inference without retraining.
+
+6. Run the Streamlit dashboard
+
+python src/extract_samples.py
+streamlit run app/streamlit_app.py
+
+7. Run the FastAPI backend
+
+uvicorn api.main:app --reload
+
+---
+
+Testing
+
+Run the automated test suite with:
+
+pytest
+
+The project includes tests for:
+
+- Core FinGuard functionality
+- FastAPI health endpoint
+- Risk-decision thresholds
+
+GitHub Actions is configured to automatically run the test suite when changes are pushed to the "main" branch or submitted through a pull request.
+
+---
+
+Limitations & Future Improvements
+
+1. Anonymized Features
+
+The "V1"–"V28" features are PCA-anonymized by the dataset publisher.
+
+A production fraud system would use richer, interpretable features such as:
+
+- Device fingerprint
+- IP information
+- Merchant category
+- Account history
+- Geographic information
+- Transaction history
+
+These would also make SHAP explanations more actionable.
+
+2. Transaction Velocity
+
+"Txn_Count_Last_Hour" cannot be calculated accurately for a single standalone API request without a live transaction stream.
+
+The current implementation therefore allows the caller to provide the value when available.
+
+A production system would maintain a real-time rolling transaction history.
+
+3. Risk Thresholds
+
+The 40% and 80% decision thresholds are illustrative.
+
+A production system should optimize thresholds using actual:
+
+- Fraud loss
+- Review cost
+- Customer-friction cost
+- Business risk tolerance
+
+4. Business Cost Assumption
+
+The ₹150 false-positive review cost is an explicit assumption used for demonstration.
+
+A real deployment would calculate this from actual operational and support costs.
+
+5. Model Monitoring
+
+A production implementation would additionally require:
+
+- Model drift monitoring
+- Data-quality monitoring
+- Fraud-pattern monitoring
+- Periodic retraining
+- Threshold recalibration
+- Model performance tracking over time
+
+---
+
+Project Status
+
+FinGuard is implemented as an end-to-end fraud-risk management system covering:
+
+Data → SQL → Feature Engineering → Machine Learning → SHAP Explainability → Anomaly Detection → Risk Decision → Streamlit Dashboard → FastAPI API → Automated Testing
+
+The project is designed as a practical demonstration of how a machine-learning fraud model can be converted into an explainable risk-management system rather than stopping at model training alone.
+
+---
+
+Author
+
+Soujanya U
+
+End-to-end machine learning and fraud-risk management project.
