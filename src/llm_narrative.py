@@ -14,8 +14,30 @@ from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
-genai.configure(api_key=os.environ["GEMINI_API_KEY"])
-_model = genai.GenerativeModel("gemini-3.6-flash")
+_model = None
+_init_error = None
+
+
+def _get_model():
+    """
+    Lazily configure and cache the Gemini model on first use, instead of at
+    import time. This means a missing/invalid GEMINI_API_KEY only breaks the
+    narrative feature when it's actually called -- it can no longer crash the
+    whole Streamlit app just from `import llm_narrative` at startup.
+    """
+    global _model, _init_error
+    if _model is not None:
+        return _model
+    if _init_error is not None:
+        raise _init_error
+    try:
+        api_key = os.environ["GEMINI_API_KEY"]
+        genai.configure(api_key=api_key)
+        _model = genai.GenerativeModel("gemini-3.6-flash")
+        return _model
+    except Exception as e:
+        _init_error = e
+        raise
 
 
 def generate_fraud_narrative(risk_probability: float, top_features: list, amount: float, recommended_action: str) -> str:
@@ -33,8 +55,9 @@ def generate_fraud_narrative(risk_probability: float, top_features: list, amount
 
     Returns:
         A short natural-language explanation string. Falls back to a
-        clear error message (not a crash) if the API call fails, so a
-        transient network/API issue never takes down the whole app.
+        clear error message (not a crash) if the API call fails OR if
+        GEMINI_API_KEY is missing/invalid -- so this never takes down
+        the rest of the app, including at import time.
     """
     feature_summary = ", ".join(f"{name} (impact: {val:+.3f})" for name, val in top_features)
 
@@ -54,7 +77,8 @@ of transaction characteristics not typical of this account's normal behavior").
 Do not invent facts not given above."""
 
     try:
-        response = _model.generate_content(prompt)
+        model = _get_model()
+        response = model.generate_content(prompt)
         return response.text.strip()
     except Exception as e:
         return (

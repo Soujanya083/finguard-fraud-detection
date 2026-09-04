@@ -14,6 +14,14 @@ from dotenv import load_dotenv
 
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", "src"))
 from llm_narrative import generate_fraud_narrative
+from scoring import (
+    RF_WEIGHT,
+    ISO_WEIGHT,
+    BLOCK_THRESHOLD,
+    REVIEW_THRESHOLD,
+    get_combined_score,
+    get_risk_bucket,
+)
 
 load_dotenv(override=True)
 
@@ -77,9 +85,6 @@ st.markdown("""
     div[data-testid="stAlert"] { border-radius: 6px; }
 </style>
 """, unsafe_allow_html=True)
-
-RF_WEIGHT = 0.7
-ISO_WEIGHT = 0.3
 
 # --- DB connection for audit logging (separate, lightweight, non-fatal if it fails) ---
 @st.cache_resource
@@ -195,7 +200,7 @@ def get_combined_risk_score(X_input_scaled):
     iso_score_norm = iso_score_scaler.transform(iso_raw_score.reshape(-1, 1)).flatten()[0]
     iso_score_norm = np.clip(iso_score_norm, 0, 1)  # guard against out-of-range values on new data
 
-    combined = (RF_WEIGHT * rf_proba) + (ISO_WEIGHT * iso_score_norm)
+    combined = get_combined_score(rf_proba, iso_score_norm)
     return combined, rf_proba, iso_score_norm
 
 
@@ -259,10 +264,10 @@ with tab1:
                 st.error(f"⚠️ Prediction failed: {e}")
                 st.stop()
 
-            if combined_proba >= 0.80:
+            if combined_proba >= BLOCK_THRESHOLD:
                 action = "🚫 Auto-block & escalate to fraud team"
                 action_color = "error"
-            elif combined_proba >= 0.40:
+            elif combined_proba >= REVIEW_THRESHOLD:
                 action = "🔎 Flag for manual review"
                 action_color = "warning"
             else:
@@ -624,17 +629,17 @@ with tab6:
 
             for i, row in sample.iterrows():
                 proba = row["y_pred_proba"]
-                if proba >= 0.80:
+                if proba >= BLOCK_THRESHOLD:
                     action = "🚫 Block"
                     blocked += 1
-                elif proba >= 0.40:
+                elif proba >= REVIEW_THRESHOLD:
                     action = "🔎 Review"
                     review += 1
                 else:
                     action = "✅ Approve"
                     approved += 1
 
-                if row["y_true"] == 1 and proba >= 0.40:
+                if row["y_true"] == 1 and proba >= REVIEW_THRESHOLD:
                     frauds_caught += 1
 
                 processed_rows.append({
@@ -713,12 +718,13 @@ with tab7:
                     iso_scores = iso_score_scaler.transform(iso_raw.reshape(-1, 1)).flatten()
                     iso_scores = np.clip(iso_scores, 0, 1)
 
-                    combined_scores = (RF_WEIGHT * rf_scores) + (ISO_WEIGHT * iso_scores)
+                    combined_scores = get_combined_score(rf_scores, iso_scores)
 
                     results_df = batch_df.copy()
                     results_df["risk_score"] = combined_scores
                     results_df["action"] = pd.cut(
-                        combined_scores, bins=[-0.01, 0.40, 0.80, 1.01],
+                        combined_scores,
+                        bins=[-0.01, REVIEW_THRESHOLD, BLOCK_THRESHOLD, 1.01],
                         labels=["Approve", "Review", "Block"],
                     )
 

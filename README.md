@@ -297,6 +297,12 @@ http://127.0.0.1:8000/docs
 
 API Validation
 
+⚠️ TODO before demo/recording: the numbers below were captured when `/predict`
+returned the Random Forest probability only. The API now returns the same
+combined `0.7×RF + 0.3×Isolation Forest` score as the dashboard, so these
+three scenarios need to be re-run against the updated API and the numbers
+replaced — otherwise this table won't match what `/predict` actually returns.
+
 The API was tested using three representative transaction scenarios:
 
 Scenario| Risk Score| Risk Level| Decision

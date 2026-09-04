@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pickle
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -8,6 +9,9 @@ import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
+
+sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
+from scoring import RF_WEIGHT, ISO_WEIGHT, get_combined_score, get_risk_bucket
 
 try:
     import shap
@@ -69,6 +73,8 @@ class Transaction(BaseModel):
 class PredictionResponse(BaseModel):
     risk_score: float
     risk_percent: float
+    rf_score: float
+    anomaly_score: Optional[float] = None
     risk_level: str
     decision: str
     model_available: bool
@@ -281,6 +287,43 @@ def scale_features(X: pd.DataFrame):
 
 
 # ---------------------------------------------------------
+# COMBINED SCORE (RF + Isolation Forest)
+# ---------------------------------------------------------
+
+def get_combined_risk_score(X_scaled):
+    """
+    Mirrors app/streamlit_app.py's get_combined_risk_score() exactly, so the
+    API and the dashboard return the same score for the same transaction.
+
+    rf_score:      Random Forest fraud probability, 0-1
+    anomaly_score: Isolation Forest anomaly score (fit on PCA columns only),
+                    normalized to 0-1, or None if the Isolation Forest
+                    artifacts weren't found -- in that case the combined
+                    score falls back to the RF score alone.
+    """
+    rf = ARTIFACTS["rf"]
+    rf_score = float(rf.predict_proba(X_scaled)[0, 1])
+
+    iso = ARTIFACTS["iso"]
+    iso_scaler = ARTIFACTS["iso_scaler"]
+    pca_col_idx = ARTIFACTS["pca_col_idx"]
+
+    if iso is None or iso_scaler is None or pca_col_idx is None:
+        # Degrade gracefully instead of pretending we blended when we didn't.
+        return rf_score, rf_score, None
+
+    X_pca_only = X_scaled[:, pca_col_idx]
+    iso_raw_score = -iso.decision_function(X_pca_only)
+    anomaly_score = float(
+        iso_scaler.transform(iso_raw_score.reshape(-1, 1)).flatten()[0]
+    )
+    anomaly_score = float(np.clip(anomaly_score, 0, 1))
+
+    combined = get_combined_score(rf_score, anomaly_score)
+    return combined, rf_score, anomaly_score
+
+
+# ---------------------------------------------------------
 # SHAP EXPLANATION
 # ---------------------------------------------------------
 
@@ -347,26 +390,6 @@ def get_shap_explanation(
 
 
 # ---------------------------------------------------------
-# RISK DECISION
-# ---------------------------------------------------------
-
-def _risk_bucket(score: float):
-
-    # Project's documented thresholds:
-    # >= 80%  -> BLOCK
-    # >= 40%  -> REVIEW
-    # < 40%   -> APPROVE
-
-    if score >= 0.80:
-        return "HIGH", "BLOCK"
-
-    if score >= 0.40:
-        return "MEDIUM", "REVIEW"
-
-    return "LOW", "APPROVE"
-
-
-# ---------------------------------------------------------
 # HEALTH CHECK
 # ---------------------------------------------------------
 
@@ -400,38 +423,49 @@ def predict(transaction: Transaction):
         # 2. Scaling
         X_scaled = scale_features(X)
 
-        # 3. Random Forest prediction
-        rf = ARTIFACTS["rf"]
+        # 3. Combined Random Forest + Isolation Forest prediction
+        #    (matches app/streamlit_app.py's get_combined_risk_score exactly)
+        risk_score, rf_score, anomaly_score = get_combined_risk_score(X_scaled)
 
-        risk_score = float(
-            rf.predict_proba(X_scaled)[0, 1]
-        )
-
-        # 4. SHAP explanation
+        # 4. SHAP explanation (computed from the RF model, same as dashboard)
         explanation = get_shap_explanation(
             X_scaled,
             MODEL_FEATURES
         )
 
         # 5. Business decision
-        risk_level, decision = _risk_bucket(
+        risk_level, decision = get_risk_bucket(
             risk_score
         )
+
+        note = (
+            f"FinGuard risk_score = {RF_WEIGHT}\u00d7Random Forest + "
+            f"{ISO_WEIGHT}\u00d7Isolation Forest, matching the dashboard. "
+            "Txn_Count_Last_Hour is supplied by the caller "
+            "when available; a single API request cannot "
+            "calculate a true live transaction-stream count."
+        )
+        if anomaly_score is None:
+            note = (
+                "Isolation Forest artifacts not found -- risk_score is the "
+                "Random Forest probability only (not blended). "
+                "Txn_Count_Last_Hour is supplied by the caller "
+                "when available; a single API request cannot "
+                "calculate a true live transaction-stream count."
+            )
 
         return PredictionResponse(
             risk_score=round(risk_score, 6),
             risk_percent=round(risk_score * 100, 2),
+            rf_score=round(rf_score, 6),
+            anomaly_score=(
+                round(anomaly_score, 6) if anomaly_score is not None else None
+            ),
             risk_level=risk_level,
             decision=decision,
             model_available=True,
             explanation=explanation,
-            note=(
-                "FinGuard performs on-demand fraud risk scoring "
-                "using the trained Random Forest model. "
-                "Txn_Count_Last_Hour is supplied by the caller "
-                "when available; a single API request cannot "
-                "calculate a true live transaction-stream count."
-            ),
+            note=note,
         )
 
     except ValueError as exc:

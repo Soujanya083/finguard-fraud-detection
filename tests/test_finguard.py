@@ -6,31 +6,36 @@ thresholds, and data integrity checks. Run with:
 
     pytest tests/test_finguard.py -v
 
-These test the LOGIC independent of the trained model files, so they run
-fast and don't require the database or model artifacts to be present.
+These import the real functions from src/scoring.py -- the same module
+app/streamlit_app.py and api/main.py both use -- so a change to the actual
+blending weights or thresholds will be caught here instead of silently
+passing against a stale hardcoded copy.
 """
+
+import os
+import sys
 
 import numpy as np
 import pytest
 
-
-# --- Re-implement the pure logic under test (mirrors app/streamlit_app.py) ---
-
-RF_WEIGHT = 0.7
-ISO_WEIGHT = 0.3
-
-
-def get_combined_score(rf_proba: float, iso_score: float) -> float:
-    return (RF_WEIGHT * rf_proba) + (ISO_WEIGHT * iso_score)
+sys.path.append(os.path.join(os.path.dirname(__file__), "..", "src"))
+from scoring import (  # noqa: E402
+    RF_WEIGHT,
+    ISO_WEIGHT,
+    BLOCK_THRESHOLD,
+    REVIEW_THRESHOLD,
+    get_combined_score,
+    get_risk_bucket,
+)
 
 
 def get_recommended_action(combined_proba: float) -> str:
-    if combined_proba >= 0.80:
-        return "block"
-    elif combined_proba >= 0.40:
-        return "review"
-    else:
-        return "approve"
+    """Thin wrapper so existing test names below (which expect lowercase
+    strings) don't need to change -- get_risk_bucket returns the real
+    ("HIGH"/"MEDIUM"/"LOW", "BLOCK"/"REVIEW"/"APPROVE") pair used in
+    production."""
+    _, decision = get_risk_bucket(combined_proba)
+    return decision.lower()
 
 
 # --- Tests: risk score blending ---
