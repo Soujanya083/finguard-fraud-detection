@@ -669,26 +669,33 @@ with tab6:
 # ============================================================
 with tab7:
     st.markdown(
-        "Score transactions in bulk — either the **full held-out test set** (56,962 real transactions, "
-        "not a curated sample) or your **own uploaded CSV**. This is the actual model and scaler running "
-        "against real feature data, the same way a production batch job would."
+        "Score transactions in bulk — either a slice of the **real held-out test set** "
+        "(56,962 real transactions, not a curated sample — choose how many below, up to "
+        "the full set) or your **own uploaded CSV**. This is the actual model and scaler "
+        "running against real feature data, the same way a production batch job would."
     )
 
     source = st.radio(
         "Data source",
-        ["Full held-out test set (real, all 56,962 transactions)", "Upload my own CSV"],
+        ["Held-out test set (real transactions, choose size below)", "Upload my own CSV"],
         horizontal=False,
     )
 
     batch_df = None
 
-    if source.startswith("Full"):
+    if source.startswith("Held-out"):
         if full_dataset_df is None:
             st.warning("⚠️ Could not load the full dataset from the database.")
         else:
-            n_rows = st.slider("How many transactions to score (for speed)", 100, 5000, 1000, step=100)
+            n_rows = st.slider(
+                "How many transactions to score (max = full test set)",
+                100, len(full_dataset_df), 5000, step=100,
+            )
             if st.button("▶ Score Test Set Sample", type="primary"):
-                batch_df = full_dataset_df.sample(n_rows).reset_index(drop=True)
+                if n_rows >= len(full_dataset_df):
+                    batch_df = full_dataset_df.reset_index(drop=True)
+                else:
+                    batch_df = full_dataset_df.sample(n_rows).reset_index(drop=True)
     else:
         uploaded = st.file_uploader(
             "Upload a CSV with the same columns as the training features "
