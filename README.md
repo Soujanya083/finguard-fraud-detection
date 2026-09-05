@@ -311,18 +311,12 @@ http://127.0.0.1:8000/docs
 
 API Validation
 
-⚠️ TODO before demo/recording: the numbers below were captured when `/predict`
-returned the Random Forest probability only. The API now returns the same
-combined `0.7×RF + 0.3×Isolation Forest` score as the dashboard, so these
-three scenarios need to be re-run against the updated API and the numbers
-replaced — otherwise this table won't match what `/predict` actually returns.
-
-The API was tested using three representative transaction scenarios:
+The API was tested using three representative transaction scenarios, scored via the combined `0.7×Random Forest + 0.3×Isolation Forest` risk score returned by `/predict`:
 
 Scenario| Risk Score| Risk Level| Decision
-Normal transaction| 1.47%| LOW| APPROVE
-Suspicious legitimate transaction| 43.23%| MEDIUM| REVIEW
-Real fraud transaction| 92.11%| HIGH| BLOCK
+Normal transaction| 11.07%| LOW| APPROVE
+Suspicious legitimate transaction| 50.81%| MEDIUM| REVIEW
+Real fraud transaction| 88.21%| HIGH| BLOCK
 
 Automated "pytest" tests were also implemented to verify the health endpoint and risk-decision logic.
 
