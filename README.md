@@ -190,6 +190,8 @@ Why Keep It as a Supporting Signal?
 
 Although Isolation Forest was weak as a standalone model, its score was tested as a smaller contribution alongside the Random Forest.
 
+Recall alone is the wrong lens here: the Isolation Forest is not being kept for its own detection ability, but for the precision it contributes to the blend. Precision rose from 0.448 (Random Forest alone) to 0.628 (0.7/0.3 blend) — a 40% relative improvement — while recall dropped only marginally, from 0.800 to 0.787. In practice that means far fewer false-positive reviews per fraud caught, for a cost of missing roughly one additional fraud case per 75 in the test set.
+
 The 30% contribution provided a better precision/recall trade-off than the tested 50/50 configuration.
 
 The dashboard therefore uses the 0.7/0.3 blend while displaying the component model scores separately for transparency.
@@ -226,6 +228,18 @@ The ₹150 review cost is an explicit assumption rather than a value derived fro
 Expressed as a scale-independent ratio:
 
 For every ₹1 spent on false-positive reviews, the model recovers approximately ₹1.54 in caught fraud.
+
+Projected Impact at Scale
+
+The ₹1,790.99 net benefit above is measured on the held-out test set alone (56,962 transactions) — it is not meant to represent real-world scale, only to demonstrate that the ratio holds. To project it to a production volume, the same per-transaction rates (fraud rate ≈0.17%, recall 79%, precision 71%, ₹150 assumed review cost) can be scaled linearly by transaction count:
+
+Monthly Transaction Volume| Projected Net Benefit (illustrative)
+56,962 (test-set baseline)| ₹1,791
+1,000,000| ₹31,442
+10,000,000| ₹314,418
+100,000,000| ₹3,144,184
+
+These are directly proportional extrapolations of the test-set ratio — not a new model or a new claim about real-world fraud amounts, which depend heavily on the actual currency, average transaction size, and fraud rate of whatever platform deploys it. The point of showing this table is the *linear scaling relationship*, not the absolute rupee figures, which remain illustrative per the note at the top of this section.
 
 ---
 
