@@ -89,17 +89,32 @@ st.markdown("""
 # --- DB connection for audit logging (separate, lightweight, non-fatal if it fails) ---
 @st.cache_resource
 def get_db_engine():
-    url = URL.create(
-        "postgresql+psycopg2",
-        username=os.environ.get("DB_USER", "postgres"),
-        password=os.environ["DB_PASSWORD"],
-        host=os.environ.get("DB_HOST", "localhost"),
-        port=os.environ.get("DB_PORT", "5432"),
-        database=os.environ.get("DB_NAME", "finguard_db"),
-    )
-    return create_engine(url)
+    try:
+        url = URL.create(
+            "postgresql+psycopg2",
+            username=os.environ.get("DB_USER", "postgres"),
+            password=os.environ["DB_PASSWORD"],
+            host=os.environ.get("DB_HOST", "localhost"),
+            port=os.environ.get("DB_PORT", "5432"),
+            database=os.environ.get("DB_NAME", "finguard_db"),
+        )
+        return create_engine(url)
+    except KeyError:
+        # DB_PASSWORD missing from .env -- degrade gracefully instead of
+        # crashing the whole app at import time (same failure class the
+        # Gemini narrative bug had, fixed the same way: never let a missing
+        # env var take down features that don't strictly need it).
+        return None
+    except Exception:
+        return None
 
 db_engine = get_db_engine()
+if db_engine is None:
+    st.warning(
+        "⚠️ Database not configured or unreachable (check DB_PASSWORD in .env) — "
+        "Audit Log, Investigator Queue, Fraud Analytics, and full-dataset Batch "
+        "Scoring will be unavailable, but single-transaction scoring still works."
+    )
 
 
 def log_to_audit_trail(label, amount, rf_score, anomaly_score, combined_score, action, actual_label):
@@ -334,10 +349,14 @@ with tab1:
 # TAB 2: Risk Threshold Simulator (unchanged — still uses RF-only test predictions)
 # ============================================================
 with tab2:
+    _test_set_note = (
+        f"({len(test_preds_df):,} real transactions)"
+        if test_preds_df is not None else "(test predictions file not found)"
+    )
     st.markdown(
         "Every fraud system has to pick a threshold: above what probability do we flag a transaction? "
         "Move the slider to see how that single choice trades off fraud caught, false alarms, and "
-        "manual review workload — computed live on the **actual held-out test set** (56,962 real transactions)."
+        f"manual review workload — computed live on the **actual held-out test set** {_test_set_note}."
     )
     st.caption(
         "Note: this simulator currently uses the Random Forest score only (not the combined RF+Isolation "
@@ -495,23 +514,24 @@ with tab4:
                                 st.error(f"⚠️ Could not save decision: {e}")
 
         # Show recently decided items too
-        try:
-            with db_engine.connect() as conn:
-                decided_df = pd.read_sql(
-                    text("""
-                        SELECT timestamp, transaction_label, amount, combined_score,
-                               investigator_decision, decided_at
-                        FROM audit_log
-                        WHERE investigator_decision IS NOT NULL
-                        ORDER BY decided_at DESC LIMIT 20
-                    """),
-                    conn,
-                )
-            if not decided_df.empty:
-                st.subheader("Recently Decided")
-                st.dataframe(decided_df, use_container_width=True)
-        except Exception:
-            pass
+        if db_engine is not None:
+            try:
+                with db_engine.connect() as conn:
+                    decided_df = pd.read_sql(
+                        text("""
+                            SELECT timestamp, transaction_label, amount, combined_score,
+                                   investigator_decision, decided_at
+                            FROM audit_log
+                            WHERE investigator_decision IS NOT NULL
+                            ORDER BY decided_at DESC LIMIT 20
+                        """),
+                        conn,
+                    )
+                if not decided_df.empty:
+                    st.subheader("Recently Decided")
+                    st.dataframe(decided_df, use_container_width=True)
+            except Exception:
+                pass
 
 # ============================================================
 # TAB 5: Fraud Analytics (new) — real SQL-driven business insights
@@ -594,7 +614,7 @@ with tab5:
 
             st.caption(
                 "All figures computed live via SQL (GROUP BY, aggregate functions) against the full "
-                "284,807-transaction dataset — not a sample."
+                f"{summary_row[0]:,}-transaction dataset stored in PostgreSQL — not a sample."
             )
         except Exception as e:
             st.error(f"⚠️ Could not load analytics: {e}")
@@ -668,27 +688,74 @@ with tab6:
 # TAB 7: Batch Scoring (new) — score REAL data, not preset scenarios
 # ============================================================
 with tab7:
+    _full_count_note = f"{len(full_dataset_df):,} real transactions" if full_dataset_df is not None else "the full processed dataset"
     st.markdown(
-        "Score transactions in bulk — either a slice of the **real held-out test set** "
-        "(56,962 real transactions, not a curated sample — choose how many below, up to "
-        "the full set) or your **own uploaded CSV**. This is the actual model and scaler "
-        "running against real feature data, the same way a production batch job would."
+        "Score transactions in bulk — the **held-out test set** (56,962 transactions the model "
+        "never trained on — the honest choice for a genuine performance check), the **full "
+        f"processed dataset** ({_full_count_note} stored in PostgreSQL, includes training data), "
+        "or your **own uploaded CSV**. This is the actual model and scaler running against real "
+        "feature data, the same way a production batch job would."
     )
 
     source = st.radio(
         "Data source",
-        ["Held-out test set (real transactions, choose size below)", "Upload my own CSV"],
+        [
+            "Held-out test set only (56,962 real transactions, never seen in training)",
+            "Full processed dataset (all real transactions, includes training data)",
+            "Upload my own CSV",
+        ],
         horizontal=False,
     )
 
     batch_df = None
+    TRUE_TEST_SIZE = 56962
+    EXPECTED_TEST_FRAUD_RATE = 0.1317  # from 03_modeling.ipynb's actual chronological split
 
     if source.startswith("Held-out"):
+        if full_dataset_df is None:
+            st.warning("⚠️ Could not load the dataset from the database.")
+        elif len(full_dataset_df) < TRUE_TEST_SIZE:
+            st.warning(
+                f"⚠️ Database only has {len(full_dataset_df):,} rows — fewer than the "
+                f"{TRUE_TEST_SIZE:,}-row test set, so it can't be reconstructed. Check your "
+                "data load (`python src/data_pipeline.py`) against the full Kaggle CSV."
+            )
+        else:
+            # The database table has no explicit train/test flag (the Time column used
+            # for the original chronological split is dropped before saving). This
+            # reconstructs the test set as the LAST 56,962 rows, assuming the table's
+            # row order matches the original chronological load order -- true as long as
+            # the data was loaded straight from the raw CSV with no reordering. The fraud
+            # rate check below catches it if that assumption doesn't hold.
+            candidate_test_df = full_dataset_df.tail(TRUE_TEST_SIZE).reset_index(drop=True)
+            if "Class" in candidate_test_df.columns:
+                actual_rate = candidate_test_df["Class"].mean() * 100
+                if abs(actual_rate - EXPECTED_TEST_FRAUD_RATE) > 0.03:
+                    st.error(
+                        f"⚠️ Reconstruction check failed: this slice's fraud rate is "
+                        f"{actual_rate:.4f}%, but the real held-out test set's fraud rate "
+                        f"(from 03_modeling.ipynb) is {EXPECTED_TEST_FRAUD_RATE:.4f}%. This "
+                        "usually means the database table's row order doesn't match the "
+                        "original chronological load, so this slice is NOT reliably the "
+                        "true test set. Falling back to Full processed dataset is safer "
+                        "until this is investigated."
+                    )
+                else:
+                    st.success(
+                        f"✅ Reconstruction check passed — this slice's fraud rate "
+                        f"({actual_rate:.4f}%) matches the real test set's "
+                        f"({EXPECTED_TEST_FRAUD_RATE:.4f}%), confirming this is genuinely "
+                        "the same held-out data used to report the model's metrics."
+                    )
+            if st.button("▶ Score Held-Out Test Set", type="primary"):
+                batch_df = candidate_test_df
+
+    elif source.startswith("Full processed"):
         if full_dataset_df is None:
             st.warning("⚠️ Could not load the full dataset from the database.")
         else:
             n_rows = st.slider(
-                "How many transactions to score (max = full test set)",
+                "How many transactions to score (max = full dataset)",
                 100, len(full_dataset_df), 5000, step=100,
             )
             if st.button("▶ Score Test Set Sample", type="primary"):
@@ -745,7 +812,23 @@ with tab7:
                     if "Class" in results_df.columns:
                         true_frauds = (results_df["Class"] == 1).sum()
                         caught = ((results_df["Class"] == 1) & (results_df["action"] != "Approve")).sum()
-                        st.info(f"Of **{true_frauds}** actual frauds in this batch, **{caught}** were flagged for review or blocked ({caught/true_frauds*100:.1f}% caught)." if true_frauds > 0 else "No confirmed frauds in this batch.")
+                        if true_frauds > 0:
+                            st.info(
+                                f"Of **{true_frauds}** actual frauds in this batch, **{caught}** were "
+                                f"flagged for review or blocked ({caught/true_frauds*100:.1f}% caught)."
+                            )
+                            if source.startswith("Full processed"):
+                                st.caption(
+                                    "⚠️ This batch is drawn from the full processed dataset, which "
+                                    "includes transactions the model was trained on, not only the "
+                                    "56,962-row held-out test set. The catch-rate above is therefore "
+                                    "not a true held-out performance measure and will likely look "
+                                    "better than the model's real test-set precision/recall reported "
+                                    "in the README -- use the Risk Threshold Simulator (Tab 2) or the "
+                                    "README's Results section for genuine held-out numbers."
+                                )
+                        else:
+                            st.info("No confirmed frauds in this batch.")
 
                     display_cols = ["Amount", "risk_score", "action"] + (["Class"] if "Class" in results_df.columns else [])
                     st.dataframe(

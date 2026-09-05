@@ -553,7 +553,13 @@ The ₹150 false-positive review cost is an explicit assumption used for demonst
 
 A real deployment would calculate this from actual operational and support costs.
 
-### 5. Model Monitoring
+### 5. Batch Scoring Data Source
+
+The database table backing the Fraud Analytics and Batch Scoring tabs (`transactions_features`) is the full processed dataset — it does not distinguish which rows were used for training versus the held-out test set, because the `Time` column used for the chronological split is dropped during feature engineering before the table is saved.
+
+As a result, a "frauds caught" rate computed from a Batch Scoring run against this full dataset can include transactions the model was directly trained on, and will likely look better than the model's genuine held-out performance reported in the Results section above. The Risk Threshold Simulator (Tab 2) and the Results section use the true 56,962-row held-out test set and are the correct source for genuine performance claims.
+
+### 6. Model Monitoring
 
 A production implementation would additionally require:
 
