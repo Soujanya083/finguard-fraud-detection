@@ -10,6 +10,6 @@ def test_health_endpoint():
 
 
 def test_risk_bucket():
-    assert main._risk_bucket(0.10) == ("LOW", "APPROVE")
-    assert main._risk_bucket(0.50) == ("MEDIUM", "REVIEW")
-    assert main._risk_bucket(0.90) == ("HIGH", "BLOCK")
+    assert main.get_risk_bucket(0.10) == ("LOW", "APPROVE")
+    assert main.get_risk_bucket(0.50) == ("MEDIUM", "REVIEW")
+    assert main.get_risk_bucket(0.90) == ("HIGH", "BLOCK")
